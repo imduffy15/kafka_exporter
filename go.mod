@@ -11,7 +11,7 @@ require (
 	github.com/eapache/go-resiliency v1.1.0
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21
 	github.com/eapache/queue v1.1.0
-	github.com/golang/protobuf v1.3.1
+	github.com/golang/protobuf v1.4.2
 	github.com/golang/snappy v0.0.1
 	github.com/konsorten/go-windows-terminal-sequences v1.0.3
 	github.com/krallistic/kazoo-go v0.0.0-20170526135507-a15279744f4e
