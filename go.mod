@@ -21,7 +21,7 @@ require (
 	github.com/prometheus/client_golang v0.9.4
 	github.com/prometheus/client_model v0.0.0-20190129233127-fd36f4220a90
 	github.com/prometheus/common v0.4.1
-	github.com/prometheus/procfs v0.0.2
+	github.com/prometheus/procfs v0.1.3
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
 	github.com/samuel/go-zookeeper v0.0.0-20180130194729-c4fab1ac1bec
 	github.com/sirupsen/logrus v1.6.0
