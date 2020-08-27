@@ -217,15 +217,6 @@ func NewExporter(opts kafkaOpts, topicFilter string, groupFilter string) (*Expor
 // Describe describes all the metrics ever exported by the Kafka exporter. It
 // implements prometheus.Collector.
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	ch <- clusterBrokers
-	ch <- topicCurrentOffset
-	ch <- topicOldestOffset
-	ch <- topicPartitions
-	ch <- topicPartitionLeader
-	ch <- topicPartitionReplicas
-	ch <- topicPartitionInSyncReplicas
-	ch <- topicPartitionUsesPreferredReplica
-	ch <- topicUnderReplicatedPartition
 	ch <- consumergroupCurrentOffset
 	ch <- consumergroupCurrentOffsetSum
 	ch <- consumergroupLag
@@ -237,9 +228,6 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 // as Prometheus metrics. It implements prometheus.Collector.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	var wg = sync.WaitGroup{}
-	ch <- prometheus.MustNewConstMetric(
-		clusterBrokers, prometheus.GaugeValue, float64(len(e.client.Brokers())),
-	)
 
 	offset := make(map[string]map[int32]int64)
 
@@ -254,124 +242,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 		e.nextMetadataRefresh = now.Add(e.metadataRefreshInterval)
 	}
-
-	topics, err := e.client.Topics()
-	if err != nil {
-		plog.Errorf("Cannot get topics: %v", err)
-		return
-	}
-
-	getTopicMetrics := func(topic string) {
-		defer wg.Done()
-		if e.topicFilter.MatchString(topic) {
-			partitions, err := e.client.Partitions(topic)
-			if err != nil {
-				plog.Errorf("Cannot get partitions of topic %s: %v", topic, err)
-				return
-			}
-			ch <- prometheus.MustNewConstMetric(
-				topicPartitions, prometheus.GaugeValue, float64(len(partitions)), topic,
-			)
-			e.mu.Lock()
-			offset[topic] = make(map[int32]int64, len(partitions))
-			e.mu.Unlock()
-			for _, partition := range partitions {
-				broker, err := e.client.Leader(topic, partition)
-				if err != nil {
-					plog.Errorf("Cannot get leader of topic %s partition %d: %v", topic, partition, err)
-				} else {
-					ch <- prometheus.MustNewConstMetric(
-						topicPartitionLeader, prometheus.GaugeValue, float64(broker.ID()), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				currentOffset, err := e.client.GetOffset(topic, partition, sarama.OffsetNewest)
-				if err != nil {
-					plog.Errorf("Cannot get current offset of topic %s partition %d: %v", topic, partition, err)
-				} else {
-					e.mu.Lock()
-					offset[topic][partition] = currentOffset
-					e.mu.Unlock()
-					ch <- prometheus.MustNewConstMetric(
-						topicCurrentOffset, prometheus.GaugeValue, float64(currentOffset), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				oldestOffset, err := e.client.GetOffset(topic, partition, sarama.OffsetOldest)
-				if err != nil {
-					plog.Errorf("Cannot get oldest offset of topic %s partition %d: %v", topic, partition, err)
-				} else {
-					ch <- prometheus.MustNewConstMetric(
-						topicOldestOffset, prometheus.GaugeValue, float64(oldestOffset), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				replicas, err := e.client.Replicas(topic, partition)
-				if err != nil {
-					plog.Errorf("Cannot get replicas of topic %s partition %d: %v", topic, partition, err)
-				} else {
-					ch <- prometheus.MustNewConstMetric(
-						topicPartitionReplicas, prometheus.GaugeValue, float64(len(replicas)), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				inSyncReplicas, err := e.client.InSyncReplicas(topic, partition)
-				if err != nil {
-					plog.Errorf("Cannot get in-sync replicas of topic %s partition %d: %v", topic, partition, err)
-				} else {
-					ch <- prometheus.MustNewConstMetric(
-						topicPartitionInSyncReplicas, prometheus.GaugeValue, float64(len(inSyncReplicas)), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				if broker != nil && replicas != nil && len(replicas) > 0 && broker.ID() == replicas[0] {
-					ch <- prometheus.MustNewConstMetric(
-						topicPartitionUsesPreferredReplica, prometheus.GaugeValue, float64(1), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				} else {
-					ch <- prometheus.MustNewConstMetric(
-						topicPartitionUsesPreferredReplica, prometheus.GaugeValue, float64(0), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				if replicas != nil && inSyncReplicas != nil && len(inSyncReplicas) < len(replicas) {
-					ch <- prometheus.MustNewConstMetric(
-						topicUnderReplicatedPartition, prometheus.GaugeValue, float64(1), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				} else {
-					ch <- prometheus.MustNewConstMetric(
-						topicUnderReplicatedPartition, prometheus.GaugeValue, float64(0), topic, strconv.FormatInt(int64(partition), 10),
-					)
-				}
-
-				if e.useZooKeeperLag {
-					ConsumerGroups, err := e.zookeeperClient.Consumergroups()
-
-					if err != nil {
-						plog.Errorf("Cannot get consumer group %v", err)
-					}
-
-					for _, group := range ConsumerGroups {
-						offset, _ := group.FetchOffset(topic, partition)
-						if offset > 0 {
-
-							consumerGroupLag := currentOffset - offset
-							ch <- prometheus.MustNewConstMetric(
-								consumergroupLagZookeeper, prometheus.GaugeValue, float64(consumerGroupLag), group.Name, topic, strconv.FormatInt(int64(partition), 10),
-							)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	for _, topic := range topics {
-		wg.Add(1)
-		go getTopicMetrics(topic)
-	}
-
-	wg.Wait()
 
 	getConsumerGroupMetrics := func(broker *sarama.Broker) {
 		defer wg.Done()
@@ -497,7 +367,7 @@ func main() {
 	kingpin.Flag("sasl.handshake", "Only set this to false if using a non-Kafka SASL proxy.").Default("true").BoolVar(&opts.useSASLHandshake)
 	kingpin.Flag("sasl.username", "SASL user name.").Default("").StringVar(&opts.saslUsername)
 	kingpin.Flag("sasl.password", "SASL user password.").Default("").StringVar(&opts.saslPassword)
-	kingpin.Flag("sasl.mechanism", "The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism").Default("").StringVar(&opts.saslMechanism)
+	kingpin.Flag("sasl.mechanism", "The SASL SCRAM SHA algorithm sha256 or sha512 as mechanism").Default("plain").StringVar(&opts.saslMechanism)
 	kingpin.Flag("tls.enabled", "Connect using TLS.").Default("false").BoolVar(&opts.useTLS)
 	kingpin.Flag("tls.ca-file", "The optional certificate authority file for TLS client authentication.").Default("").StringVar(&opts.tlsCAFile)
 	kingpin.Flag("tls.cert-file", "The optional certificate file for client authentication.").Default("").StringVar(&opts.tlsCertFile)
@@ -528,57 +398,6 @@ func main() {
 			}
 		}
 	}
-
-	clusterBrokers = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "", "brokers"),
-		"Number of Brokers in the Kafka Cluster.",
-		nil, labels,
-	)
-	topicPartitions = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partitions"),
-		"Number of partitions for this Topic",
-		[]string{"topic"}, labels,
-	)
-	topicCurrentOffset = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_current_offset"),
-		"Current Offset of a Broker at Topic/Partition",
-		[]string{"topic", "partition"}, labels,
-	)
-	topicOldestOffset = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_oldest_offset"),
-		"Oldest Offset of a Broker at Topic/Partition",
-		[]string{"topic", "partition"}, labels,
-	)
-
-	topicPartitionLeader = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_leader"),
-		"Leader Broker ID of this Topic/Partition",
-		[]string{"topic", "partition"}, labels,
-	)
-
-	topicPartitionReplicas = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_replicas"),
-		"Number of Replicas for this Topic/Partition",
-		[]string{"topic", "partition"}, labels,
-	)
-
-	topicPartitionInSyncReplicas = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_in_sync_replica"),
-		"Number of In-Sync Replicas for this Topic/Partition",
-		[]string{"topic", "partition"}, labels,
-	)
-
-	topicPartitionUsesPreferredReplica = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_leader_is_preferred"),
-		"1 if Topic/Partition is using the Preferred Broker",
-		[]string{"topic", "partition"}, labels,
-	)
-
-	topicUnderReplicatedPartition = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "topic", "partition_under_replicated_partition"),
-		"1 if Topic/Partition is under Replicated",
-		[]string{"topic", "partition"}, labels,
-	)
 
 	consumergroupCurrentOffset = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "consumergroup", "current_offset"),
