@@ -11,12 +11,11 @@ var (
 )
 
 func TestSaslAuthenticateResponse(t *testing.T) {
-
 	response := new(SaslAuthenticateResponse)
 	response.Err = ErrSASLAuthenticationFailed
 	msg := "err"
 	response.ErrorMessage = &msg
 	response.SaslAuthBytes = []byte(`msg`)
 
-	testResponse(t, "authenticate reponse", response, saslAuthenticatResponseErr)
+	testResponse(t, "authenticate response", response, saslAuthenticatResponseErr)
 }

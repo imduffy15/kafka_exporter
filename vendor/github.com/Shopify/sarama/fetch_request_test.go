@@ -26,23 +26,65 @@ var (
 		0x00, 0x05, 't', 'o', 'p', 'i', 'c',
 		0x00, 0x00, 0x00, 0x01,
 		0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x56}
+
+	fetchRequestOneBlockV11 = []byte{
+		0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0xFF,
+		0x01,
+		0x00, 0x00, 0x00, 0xAA, // sessionID
+		0x00, 0x00, 0x00, 0xEE, // sessionEpoch
+		0x00, 0x00, 0x00, 0x01,
+		0x00, 0x05, 't', 'o', 'p', 'i', 'c',
+		0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x12, // partitionID
+		0xFF, 0xFF, 0xFF, 0xFF, // currentLeaderEpoch
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x34, // fetchOffset
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // logStartOffset
+		0x00, 0x00, 0x00, 0x56, // maxBytes
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x06, 'r', 'a', 'c', 'k', '0', '1', // rackID
+	}
 )
 
 func TestFetchRequest(t *testing.T) {
-	request := new(FetchRequest)
-	testRequest(t, "no blocks", request, fetchRequestNoBlocks)
+	t.Run("no blocks", func(t *testing.T) {
+		request := new(FetchRequest)
+		testRequest(t, "no blocks", request, fetchRequestNoBlocks)
+	})
 
-	request.MaxWaitTime = 0x20
-	request.MinBytes = 0xEF
-	testRequest(t, "with properties", request, fetchRequestWithProperties)
+	t.Run("with properties", func(t *testing.T) {
+		request := new(FetchRequest)
+		request.MaxWaitTime = 0x20
+		request.MinBytes = 0xEF
+		testRequest(t, "with properties", request, fetchRequestWithProperties)
+	})
 
-	request.MaxWaitTime = 0
-	request.MinBytes = 0
-	request.AddBlock("topic", 0x12, 0x34, 0x56)
-	testRequest(t, "one block", request, fetchRequestOneBlock)
+	t.Run("one block", func(t *testing.T) {
+		request := new(FetchRequest)
+		request.MaxWaitTime = 0
+		request.MinBytes = 0
+		request.AddBlock("topic", 0x12, 0x34, 0x56)
+		testRequest(t, "one block", request, fetchRequestOneBlock)
+	})
 
-	request.Version = 4
-	request.MaxBytes = 0xFF
-	request.Isolation = ReadCommitted
-	testRequest(t, "one block v4", request, fetchRequestOneBlockV4)
+	t.Run("one block v4", func(t *testing.T) {
+		request := new(FetchRequest)
+		request.Version = 4
+		request.MaxBytes = 0xFF
+		request.Isolation = ReadCommitted
+		request.AddBlock("topic", 0x12, 0x34, 0x56)
+		testRequest(t, "one block v4", request, fetchRequestOneBlockV4)
+	})
+
+	t.Run("one block v11 rackid", func(t *testing.T) {
+		request := new(FetchRequest)
+		request.Version = 11
+		request.MaxBytes = 0xFF
+		request.Isolation = ReadCommitted
+		request.SessionID = 0xAA
+		request.SessionEpoch = 0xEE
+		request.AddBlock("topic", 0x12, 0x34, 0x56)
+		request.RackID = "rack01"
+		testRequest(t, "one block v11 rackid", request, fetchRequestOneBlockV11)
+	})
 }

@@ -8,13 +8,15 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rcrowley/go-metrics"
+
 	"github.com/Shopify/sarama"
 	"github.com/Shopify/sarama/tools/tls"
-	"github.com/rcrowley/go-metrics"
 )
 
 var (
 	brokerList    = flag.String("brokers", os.Getenv("KAFKA_PEERS"), "The comma separated list of brokers in the Kafka cluster. You can also set the KAFKA_PEERS environment variable")
+	headers       = flag.String("headers", "", "The headers of the message to produce. Example: -headers=foo:bar,bar:foo")
 	topic         = flag.String("topic", "", "REQUIRED: the topic to produce to")
 	key           = flag.String("key", "", "The key of the message to produce. Can be empty.")
 	value         = flag.String("value", "", "REQUIRED: the value of the message to produce. You can also provide the value on stdin.")
@@ -97,6 +99,25 @@ func main() {
 		message.Value = sarama.ByteEncoder(bytes)
 	} else {
 		printUsageErrorAndExit("-value is required, or you have to provide the value on stdin")
+	}
+
+	if *headers != "" {
+		var hdrs []sarama.RecordHeader
+		arrHdrs := strings.Split(*headers, ",")
+		for _, h := range arrHdrs {
+			if header := strings.Split(h, ":"); len(header) != 2 {
+				printUsageErrorAndExit("-header should be key:value. Example: -headers=foo:bar,bar:foo")
+			} else {
+				hdrs = append(hdrs, sarama.RecordHeader{
+					Key:   []byte(header[0]),
+					Value: []byte(header[1]),
+				})
+			}
+		}
+
+		if len(hdrs) != 0 {
+			message.Headers = hdrs
+		}
 	}
 
 	producer, err := sarama.NewSyncProducer(strings.Split(*brokerList, ","), config)

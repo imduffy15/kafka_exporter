@@ -149,7 +149,7 @@ func TestClusterAdminListTopics(t *testing.T) {
 	})
 
 	config := NewConfig()
-	config.Version = V1_0_0_0
+	config.Version = V1_1_0_0
 	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
 	if err != nil {
 		t.Fatal(err)
@@ -172,7 +172,7 @@ func TestClusterAdminListTopics(t *testing.T) {
 	if found {
 		t.Fatal(errors.New("default topic config entry incorrectly found in response"))
 	}
-	value, _ := topic.ConfigEntries["retention.ms"]
+	value := topic.ConfigEntries["retention.ms"]
 	if value == nil || *value != "5000" {
 		t.Fatal(errors.New("non-default topic config entry not found in response"))
 	}
@@ -326,6 +326,167 @@ func TestClusterAdminCreatePartitionsWithoutAuthorization(t *testing.T) {
 	if !strings.HasSuffix(err.Error(), want) {
 		t.Fatal(err)
 	}
+	err = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClusterAdminAlterPartitionReassignments(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	secondBroker := NewMockBroker(t, 2)
+	defer secondBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(secondBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()).
+			SetBroker(secondBroker.Addr(), secondBroker.BrokerID()),
+	})
+
+	secondBroker.SetHandlerByMap(map[string]MockResponse{
+		"AlterPartitionReassignmentsRequest": NewMockAlterPartitionReassignmentsResponse(t),
+	})
+
+	config := NewConfig()
+	config.Version = V2_4_0_0
+	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var topicAssignment = make([][]int32, 0, 3)
+
+	err = admin.AlterPartitionReassignments("my_topic", topicAssignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClusterAdminAlterPartitionReassignmentsWithDiffVersion(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	secondBroker := NewMockBroker(t, 2)
+	defer secondBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(secondBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()).
+			SetBroker(secondBroker.Addr(), secondBroker.BrokerID()),
+	})
+
+	secondBroker.SetHandlerByMap(map[string]MockResponse{
+		"AlterPartitionReassignmentsRequest": NewMockAlterPartitionReassignmentsResponse(t),
+	})
+
+	config := NewConfig()
+	config.Version = V2_3_0_0
+	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var topicAssignment = make([][]int32, 0, 3)
+
+	err = admin.AlterPartitionReassignments("my_topic", topicAssignment)
+
+	if !strings.ContainsAny(err.Error(), ErrUnsupportedVersion.Error()) {
+		t.Fatal(err)
+	}
+
+	err = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClusterAdminListPartitionReassignments(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	secondBroker := NewMockBroker(t, 2)
+	defer secondBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(secondBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()).
+			SetBroker(secondBroker.Addr(), secondBroker.BrokerID()),
+	})
+
+	secondBroker.SetHandlerByMap(map[string]MockResponse{
+		"ListPartitionReassignmentsRequest": NewMockListPartitionReassignmentsResponse(t),
+	})
+
+	config := NewConfig()
+	config.Version = V2_4_0_0
+	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := admin.ListPartitionReassignments("my_topic", []int32{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partitionStatus, ok := response["my_topic"]
+	if !ok {
+		t.Fatalf("topic missing in response")
+	} else {
+		if len(partitionStatus) != 2 {
+			t.Fatalf("partition missing in response")
+		}
+	}
+
+	err = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClusterAdminListPartitionReassignmentsWithDiffVersion(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	secondBroker := NewMockBroker(t, 2)
+	defer secondBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(secondBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()).
+			SetBroker(secondBroker.Addr(), secondBroker.BrokerID()),
+	})
+
+	secondBroker.SetHandlerByMap(map[string]MockResponse{
+		"ListPartitionReassignmentsRequest": NewMockListPartitionReassignmentsResponse(t),
+	})
+
+	config := NewConfig()
+	config.Version = V2_3_0_0
+	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var partitions = make([]int32, 0)
+
+	_, err = admin.ListPartitionReassignments("my_topic", partitions)
+
+	if !strings.ContainsAny(err.Error(), ErrUnsupportedVersion.Error()) {
+		t.Fatal(err)
+	}
+
 	err = admin.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -488,21 +649,138 @@ func TestClusterAdminDescribeConfig(t *testing.T) {
 		"DescribeConfigsRequest": NewMockDescribeConfigsResponse(t),
 	})
 
+	var tests = []struct {
+		saramaVersion   KafkaVersion
+		requestVersion  int16
+		includeSynonyms bool
+	}{
+		{V1_0_0_0, 0, false},
+		{V1_1_0_0, 1, true},
+		{V1_1_1_0, 1, true},
+		{V2_0_0_0, 2, true},
+	}
+	for _, tt := range tests {
+		config := NewConfig()
+		config.Version = tt.saramaVersion
+		admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			_ = admin.Close()
+		}()
+
+		resource := ConfigResource{
+			Name:        "r1",
+			Type:        TopicResource,
+			ConfigNames: []string{"my_topic"},
+		}
+
+		entries, err := admin.DescribeConfig(resource)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		history := seedBroker.History()
+		describeReq, ok := history[len(history)-1].Request.(*DescribeConfigsRequest)
+		if !ok {
+			t.Fatal("failed to find DescribeConfigsRequest in mockBroker history")
+		}
+
+		if describeReq.Version != tt.requestVersion {
+			t.Fatalf(
+				"requestVersion %v did not match expected %v",
+				describeReq.Version, tt.requestVersion)
+		}
+
+		if len(entries) <= 0 {
+			t.Fatal(errors.New("no resource present"))
+		}
+		if tt.includeSynonyms {
+			if len(entries[0].Synonyms) == 0 {
+				t.Fatal("expected synonyms to have been included")
+			}
+		}
+	}
+}
+
+func TestClusterAdminDescribeConfigWithErrorCode(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(seedBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()),
+		"DescribeConfigsRequest": NewMockDescribeConfigsResponseWithErrorCode(t),
+	})
+
 	config := NewConfig()
-	config.Version = V1_0_0_0
+	config.Version = V1_1_0_0
 	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() {
+		_ = admin.Close()
+	}()
 
-	resource := ConfigResource{Name: "r1", Type: TopicResource, ConfigNames: []string{"my_topic"}}
-	entries, err := admin.DescribeConfig(resource)
+	resource := ConfigResource{
+		Name:        "r1",
+		Type:        TopicResource,
+		ConfigNames: []string{"my_topic"},
+	}
+
+	_, err = admin.DescribeConfig(resource)
+	if err == nil {
+		t.Fatal(errors.New("ErrorCode present but no Error returned"))
+	}
+}
+
+// TestClusterAdminDescribeBrokerConfig ensures that a describe broker config
+// is sent to the broker in the resource struct, _not_ the controller
+func TestClusterAdminDescribeBrokerConfig(t *testing.T) {
+	controllerBroker := NewMockBroker(t, 1)
+	defer controllerBroker.Close()
+	configBroker := NewMockBroker(t, 2)
+	defer configBroker.Close()
+
+	controllerBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(controllerBroker.BrokerID()).
+			SetBroker(controllerBroker.Addr(), controllerBroker.BrokerID()).
+			SetBroker(configBroker.Addr(), configBroker.BrokerID()),
+	})
+
+	configBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(controllerBroker.BrokerID()).
+			SetBroker(controllerBroker.Addr(), controllerBroker.BrokerID()).
+			SetBroker(configBroker.Addr(), configBroker.BrokerID()),
+		"DescribeConfigsRequest": NewMockDescribeConfigsResponse(t),
+	})
+
+	config := NewConfig()
+	config.Version = V1_0_0_0
+	admin, err := NewClusterAdmin(
+		[]string{
+			controllerBroker.Addr(),
+			configBroker.Addr(),
+		}, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(entries) <= 0 {
-		t.Fatal(errors.New("no resource present"))
+	for _, resourceType := range []ConfigResourceType{BrokerResource, BrokerLoggerResource} {
+		resource := ConfigResource{Name: "2", Type: resourceType}
+		entries, err := admin.DescribeConfig(resource)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(entries) <= 0 {
+			t.Fatal(errors.New("no resource present"))
+		}
 	}
 
 	err = admin.Close()
@@ -531,11 +809,96 @@ func TestClusterAdminAlterConfig(t *testing.T) {
 
 	var value string
 	entries := make(map[string]*string)
-	value = "3"
-	entries["ReplicationFactor"] = &value
+	value = "60000"
+	entries["retention.ms"] = &value
 	err = admin.AlterConfig(TopicResource, "my_topic", entries, false)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	err = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClusterAdminAlterConfigWithErrorCode(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(seedBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()),
+		"AlterConfigsRequest": NewMockAlterConfigsResponseWithErrorCode(t),
+	})
+
+	config := NewConfig()
+	config.Version = V1_0_0_0
+	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = admin.Close()
+	}()
+
+	var value string
+	entries := make(map[string]*string)
+	value = "60000"
+	entries["retention.ms"] = &value
+	err = admin.AlterConfig(TopicResource, "my_topic", entries, false)
+	if err == nil {
+		t.Fatal(errors.New("ErrorCode present but no Error returned"))
+	}
+}
+
+func TestClusterAdminAlterBrokerConfig(t *testing.T) {
+	controllerBroker := NewMockBroker(t, 1)
+	defer controllerBroker.Close()
+	configBroker := NewMockBroker(t, 2)
+	defer configBroker.Close()
+
+	controllerBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(controllerBroker.BrokerID()).
+			SetBroker(controllerBroker.Addr(), controllerBroker.BrokerID()).
+			SetBroker(configBroker.Addr(), configBroker.BrokerID()),
+	})
+	configBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(controllerBroker.BrokerID()).
+			SetBroker(controllerBroker.Addr(), controllerBroker.BrokerID()).
+			SetBroker(configBroker.Addr(), configBroker.BrokerID()),
+		"AlterConfigsRequest": NewMockAlterConfigsResponse(t),
+	})
+
+	config := NewConfig()
+	config.Version = V1_0_0_0
+	admin, err := NewClusterAdmin(
+		[]string{
+			controllerBroker.Addr(),
+			configBroker.Addr(),
+		}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var value string
+	entries := make(map[string]*string)
+	value = "3"
+	entries["min.insync.replicas"] = &value
+
+	for _, resourceType := range []ConfigResourceType{BrokerResource, BrokerLoggerResource} {
+		resource := ConfigResource{Name: "2", Type: resourceType}
+		err = admin.AlterConfig(
+			resource.Type,
+			resource.Name,
+			entries,
+			false)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	err = admin.Close()
@@ -821,7 +1184,6 @@ func TestListConsumerGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestListConsumerGroupsMultiBroker(t *testing.T) {
@@ -886,7 +1248,6 @@ func TestListConsumerGroupsMultiBroker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestListConsumerGroupOffsets(t *testing.T) {
@@ -915,7 +1276,7 @@ func TestListConsumerGroupOffsets(t *testing.T) {
 	}
 
 	response, err := admin.ListConsumerGroupOffsets(group, map[string][]int32{
-		topic: []int32{0},
+		topic: {0},
 	})
 	if err != nil {
 		t.Fatalf("ListConsumerGroupOffsets failed with error %v", err)
@@ -934,7 +1295,6 @@ func TestListConsumerGroupOffsets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestDeleteConsumerGroup(t *testing.T) {
@@ -964,5 +1324,100 @@ func TestDeleteConsumerGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteConsumerGroup failed with error %v", err)
 	}
+}
 
+// TestRefreshMetaDataWithDifferentController ensures that the cached
+// controller can be forcibly updated from Metadata by the admin client
+func TestRefreshMetaDataWithDifferentController(t *testing.T) {
+	seedBroker1 := NewMockBroker(t, 1)
+	seedBroker2 := NewMockBroker(t, 2)
+	defer seedBroker1.Close()
+	defer seedBroker2.Close()
+
+	seedBroker1.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(seedBroker1.BrokerID()).
+			SetBroker(seedBroker1.Addr(), seedBroker1.BrokerID()).
+			SetBroker(seedBroker2.Addr(), seedBroker2.BrokerID()),
+	})
+
+	config := NewConfig()
+	config.Version = V1_1_0_0
+
+	client, err := NewClient([]string{seedBroker1.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ca := clusterAdmin{client: client, conf: config}
+
+	if b, _ := ca.Controller(); seedBroker1.BrokerID() != b.ID() {
+		t.Fatalf("expected cached controller to be %d rather than %d",
+			seedBroker1.BrokerID(), b.ID())
+	}
+
+	seedBroker1.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(seedBroker2.BrokerID()).
+			SetBroker(seedBroker1.Addr(), seedBroker1.BrokerID()).
+			SetBroker(seedBroker2.Addr(), seedBroker2.BrokerID()),
+	})
+
+	if b, _ := ca.refreshController(); seedBroker2.BrokerID() != b.ID() {
+		t.Fatalf("expected refreshed controller to be %d rather than %d",
+			seedBroker2.BrokerID(), b.ID())
+	}
+
+	if b, _ := ca.Controller(); seedBroker2.BrokerID() != b.ID() {
+		t.Fatalf("expected cached controller to be %d rather than %d",
+			seedBroker2.BrokerID(), b.ID())
+	}
+}
+
+func TestDescribeLogDirs(t *testing.T) {
+	seedBroker := NewMockBroker(t, 1)
+	defer seedBroker.Close()
+
+	seedBroker.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetController(seedBroker.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()),
+		"DescribeLogDirsRequest": NewMockDescribeLogDirsResponse(t).
+			SetLogDirs("/tmp/logs", map[string]int{"topic1": 2, "topic2": 2}),
+	})
+
+	config := NewConfig()
+	config.Version = V1_0_0_0
+
+	admin, err := NewClusterAdmin([]string{seedBroker.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logDirsPerBroker, err := admin.DescribeLogDirs([]int32{seedBroker.BrokerID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(logDirsPerBroker) != 1 {
+		t.Fatalf("Expected %v results, got %v", 1, len(logDirsPerBroker))
+	}
+	logDirs := logDirsPerBroker[seedBroker.BrokerID()]
+	if len(logDirs) != 1 {
+		t.Fatalf("Expected log dirs for broker %v to be returned, but it did not, got %v", seedBroker.BrokerID(), len(logDirs))
+	}
+	logDirsBroker := logDirs[0]
+	if logDirsBroker.ErrorCode != ErrNoError {
+		t.Fatalf("Expected no error for broker %v, but it was %v", seedBroker.BrokerID(), logDirsBroker.ErrorCode)
+	}
+	if logDirsBroker.Path != "/tmp/logs" {
+		t.Fatalf("Expected log dirs for broker %v to be '/tmp/logs', but it was %v", seedBroker.BrokerID(), logDirsBroker.Path)
+	}
+	if len(logDirsBroker.Topics) != 2 {
+		t.Fatalf("Expected log dirs for broker %v to have 2 topics, but it had %v", seedBroker.BrokerID(), len(logDirsBroker.Topics))
+	}
+	err = admin.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 }

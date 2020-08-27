@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -488,7 +489,7 @@ func TestConsumerReceivingFetchResponseWithTooOldRecords(t *testing.T) {
 
 	cfg := NewConfig()
 	cfg.Consumer.Return.Errors = true
-	cfg.Version = V1_1_0_0
+	cfg.Version = V0_11_0_0
 
 	broker0 := NewMockBroker(t, 0)
 
@@ -569,6 +570,55 @@ func TestConsumeMessageWithNewerFetchAPIVersion(t *testing.T) {
 	broker0.Close()
 }
 
+func TestConsumeMessageWithSessionIDs(t *testing.T) {
+	// Given
+	fetchResponse1 := &FetchResponse{Version: 7}
+	fetchResponse1.AddMessage("my_topic", 0, nil, testMsg, 1)
+	fetchResponse1.AddMessage("my_topic", 0, nil, testMsg, 2)
+
+	cfg := NewConfig()
+	cfg.Version = V1_1_0_0
+
+	broker0 := NewMockBroker(t, 0)
+	fetchResponse2 := &FetchResponse{}
+	fetchResponse2.Version = 7
+	fetchResponse2.AddError("my_topic", 0, ErrNoError)
+
+	broker0.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetBroker(broker0.Addr(), broker0.BrokerID()).
+			SetLeader("my_topic", 0, broker0.BrokerID()),
+		"OffsetRequest": NewMockOffsetResponse(t).
+			SetVersion(1).
+			SetOffset("my_topic", 0, OffsetNewest, 1234).
+			SetOffset("my_topic", 0, OffsetOldest, 0),
+		"FetchRequest": NewMockSequence(fetchResponse1, fetchResponse2),
+	})
+
+	master, err := NewConsumer([]string{broker0.Addr()}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// When
+	consumer, err := master.ConsumePartition("my_topic", 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertMessageOffset(t, <-consumer.Messages(), 1)
+	assertMessageOffset(t, <-consumer.Messages(), 2)
+
+	safeClose(t, consumer)
+	safeClose(t, master)
+	broker0.Close()
+
+	fetchReq := broker0.History()[3].Request.(*FetchRequest)
+	if fetchReq.SessionID != 0 || fetchReq.SessionEpoch != -1 {
+		t.Error("Expected session ID to be zero & Epoch to be -1")
+	}
+}
+
 // It is fine if offsets of fetched messages are not sequential (although
 // strictly increasing!).
 func TestConsumerNonSequentialOffsets(t *testing.T) {
@@ -640,6 +690,7 @@ func TestConsumerRebalancingMultiplePartitions(t *testing.T) {
 		"MetadataRequest": NewMockMetadataResponse(t).
 			SetBroker(leader0.Addr(), leader0.BrokerID()).
 			SetBroker(leader1.Addr(), leader1.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()).
 			SetLeader("my_topic", 0, leader0.BrokerID()).
 			SetLeader("my_topic", 1, leader1.BrokerID()),
 	})
@@ -720,7 +771,10 @@ func TestConsumerRebalancingMultiplePartitions(t *testing.T) {
 	seedBroker.SetHandlerByMap(map[string]MockResponse{
 		"MetadataRequest": NewMockMetadataResponse(t).
 			SetLeader("my_topic", 0, leader1.BrokerID()).
-			SetLeader("my_topic", 1, leader1.BrokerID()),
+			SetLeader("my_topic", 1, leader1.BrokerID()).
+			SetBroker(leader0.Addr(), leader0.BrokerID()).
+			SetBroker(leader1.Addr(), leader1.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()),
 	})
 
 	// leader0 says no longer leader of partition 0
@@ -759,7 +813,10 @@ func TestConsumerRebalancingMultiplePartitions(t *testing.T) {
 	seedBroker.SetHandlerByMap(map[string]MockResponse{
 		"MetadataRequest": NewMockMetadataResponse(t).
 			SetLeader("my_topic", 0, leader1.BrokerID()).
-			SetLeader("my_topic", 1, leader0.BrokerID()),
+			SetLeader("my_topic", 1, leader0.BrokerID()).
+			SetBroker(leader0.Addr(), leader0.BrokerID()).
+			SetBroker(leader1.Addr(), leader1.BrokerID()).
+			SetBroker(seedBroker.Addr(), seedBroker.BrokerID()),
 	})
 
 	// leader1 provides three more messages on partition0, says no longer leader of partition1
@@ -1016,7 +1073,6 @@ func TestConsumerTimestamps(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	type testMessage struct {
 		key       Encoder
-		value     Encoder
 		offset    int64
 		timestamp time.Time
 	}
@@ -1027,32 +1083,32 @@ func TestConsumerTimestamps(t *testing.T) {
 		expectedTimestamp []time.Time
 	}{
 		{MinVersion, false, []testMessage{
-			{nil, testMsg, 1, now},
-			{nil, testMsg, 2, now},
+			{testMsg, 1, now},
+			{testMsg, 2, now},
 		}, []time.Time{{}, {}}},
 		{V0_9_0_0, false, []testMessage{
-			{nil, testMsg, 1, now},
-			{nil, testMsg, 2, now},
+			{testMsg, 1, now},
+			{testMsg, 2, now},
 		}, []time.Time{{}, {}}},
 		{V0_10_0_0, false, []testMessage{
-			{nil, testMsg, 1, now},
-			{nil, testMsg, 2, now},
+			{testMsg, 1, now},
+			{testMsg, 2, now},
 		}, []time.Time{{}, {}}},
 		{V0_10_2_1, false, []testMessage{
-			{nil, testMsg, 1, now.Add(time.Second)},
-			{nil, testMsg, 2, now.Add(2 * time.Second)},
+			{testMsg, 1, now.Add(time.Second)},
+			{testMsg, 2, now.Add(2 * time.Second)},
 		}, []time.Time{now.Add(time.Second), now.Add(2 * time.Second)}},
 		{V0_10_2_1, true, []testMessage{
-			{nil, testMsg, 1, now.Add(time.Second)},
-			{nil, testMsg, 2, now.Add(2 * time.Second)},
+			{testMsg, 1, now.Add(time.Second)},
+			{testMsg, 2, now.Add(2 * time.Second)},
 		}, []time.Time{now, now}},
 		{V0_11_0_0, false, []testMessage{
-			{nil, testMsg, 1, now.Add(time.Second)},
-			{nil, testMsg, 2, now.Add(2 * time.Second)},
+			{testMsg, 1, now.Add(time.Second)},
+			{testMsg, 2, now.Add(2 * time.Second)},
 		}, []time.Time{now.Add(time.Second), now.Add(2 * time.Second)}},
 		{V0_11_0_0, true, []testMessage{
-			{nil, testMsg, 1, now.Add(time.Second)},
-			{nil, testMsg, 2, now.Add(2 * time.Second)},
+			{testMsg, 1, now.Add(time.Second)},
+			{testMsg, 2, now.Add(2 * time.Second)},
 		}, []time.Time{now, now}},
 	} {
 		var fr *FetchResponse
@@ -1285,5 +1341,114 @@ func Test_partitionConsumer_parseResponse(t *testing.T) {
 				t.Errorf("partitionConsumer.parseResponse() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func testConsumerInterceptor(
+	t *testing.T,
+	interceptors []ConsumerInterceptor,
+	expectationFn func(*testing.T, int, *ConsumerMessage),
+) {
+	// Given
+	broker0 := NewMockBroker(t, 0)
+
+	mockFetchResponse := NewMockFetchResponse(t, 1)
+	for i := 0; i < 10; i++ {
+		mockFetchResponse.SetMessage("my_topic", 0, int64(i), testMsg)
+	}
+
+	broker0.SetHandlerByMap(map[string]MockResponse{
+		"MetadataRequest": NewMockMetadataResponse(t).
+			SetBroker(broker0.Addr(), broker0.BrokerID()).
+			SetLeader("my_topic", 0, broker0.BrokerID()),
+		"OffsetRequest": NewMockOffsetResponse(t).
+			SetOffset("my_topic", 0, OffsetOldest, 0).
+			SetOffset("my_topic", 0, OffsetNewest, 0),
+		"FetchRequest": mockFetchResponse,
+	})
+	config := NewConfig()
+	config.Consumer.Interceptors = interceptors
+	// When
+	master, err := NewConsumer([]string{broker0.Addr()}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	consumer, err := master.ConsumePartition("my_topic", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		select {
+		case msg := <-consumer.Messages():
+			expectationFn(t, i, msg)
+		case err := <-consumer.Errors():
+			t.Error(err)
+		}
+	}
+
+	safeClose(t, consumer)
+	safeClose(t, master)
+	broker0.Close()
+}
+
+func TestConsumerInterceptors(t *testing.T) {
+	tests := []struct {
+		name          string
+		interceptors  []ConsumerInterceptor
+		expectationFn func(*testing.T, int, *ConsumerMessage)
+	}{
+		{
+			name:         "intercept messages",
+			interceptors: []ConsumerInterceptor{&appendInterceptor{i: 0}},
+			expectationFn: func(t *testing.T, i int, msg *ConsumerMessage) {
+				ev, _ := testMsg.Encode()
+				expected := string(ev) + strconv.Itoa(i)
+				v := string(msg.Value)
+				if v != expected {
+					t.Errorf("Interceptor should have incremented the value, got %s, expected %s", v, expected)
+				}
+			},
+		},
+		{
+			name:         "interceptor chain",
+			interceptors: []ConsumerInterceptor{&appendInterceptor{i: 0}, &appendInterceptor{i: 1000}},
+			expectationFn: func(t *testing.T, i int, msg *ConsumerMessage) {
+				ev, _ := testMsg.Encode()
+				expected := string(ev) + strconv.Itoa(i) + strconv.Itoa(i+1000)
+				v := string(msg.Value)
+				if v != expected {
+					t.Errorf("Interceptor should have incremented the value, got %s, expected %s", v, expected)
+				}
+			},
+		},
+		{
+			name:         "interceptor chain with one interceptor failing",
+			interceptors: []ConsumerInterceptor{&appendInterceptor{i: -1}, &appendInterceptor{i: 1000}},
+			expectationFn: func(t *testing.T, i int, msg *ConsumerMessage) {
+				ev, _ := testMsg.Encode()
+				expected := string(ev) + strconv.Itoa(i+1000)
+				v := string(msg.Value)
+				if v != expected {
+					t.Errorf("Interceptor should have not changed the value, got %s, expected %s", v, expected)
+				}
+			},
+		},
+		{
+			name:         "interceptor chain with all interceptors failing",
+			interceptors: []ConsumerInterceptor{&appendInterceptor{i: -1}, &appendInterceptor{i: -1}},
+			expectationFn: func(t *testing.T, i int, msg *ConsumerMessage) {
+				ev, _ := testMsg.Encode()
+				expected := string(ev)
+				v := string(msg.Value)
+				if v != expected {
+					t.Errorf("Interceptor should have incremented the value, got %s, expected %s", v, expected)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { testConsumerInterceptor(t, tt.interceptors, tt.expectationFn) })
 	}
 }

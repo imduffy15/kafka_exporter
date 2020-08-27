@@ -14,15 +14,20 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/s2"
+	"github.com/klauspost/compress/s2/cmd/internal/readahead"
 )
 
 var (
 	safe   = flag.Bool("safe", false, "Do not overwrite output files")
+	verify = flag.Bool("verify", false, "Verify files, but do not write output")
 	stdout = flag.Bool("c", false, "Write all output to stdout. Multiple input files will be concatenated")
 	remove = flag.Bool("rm", false, "Delete source file(s) after successful decompression")
 	quiet  = flag.Bool("q", false, "Don't write any output to terminal, except errors")
 	bench  = flag.Int("bench", 0, "Run benchmark n times. No output will be written")
 	help   = flag.Bool("help", false, "Display help")
+
+	version = "(dev)"
+	date    = "(unknown)"
 )
 
 func main() {
@@ -32,6 +37,9 @@ func main() {
 	// No args, use stdin/stdout
 	args := flag.Args()
 	if len(args) == 0 || *help {
+		_, _ = fmt.Fprintf(os.Stderr, "s2 decompress v%v, built at %v.\n\n", version, date)
+		_, _ = fmt.Fprintf(os.Stderr, "Copyright (c) 2011 The Snappy-Go Authors. All rights reserved.\n"+
+			"Copyright (c) 2019 Klaus Post. All rights reserved.\n\n")
 		_, _ = fmt.Fprintln(os.Stderr, `Usage: s2d [options] file1 file2
 
 Decompresses all files supplied as input. Input files must end with '.s2' or '.snappy'.
@@ -46,8 +54,13 @@ Options:`)
 	}
 	if len(args) == 1 && args[0] == "-" {
 		r.Reset(os.Stdin)
-		_, err := io.Copy(os.Stdout, r)
-		exitErr(err)
+		if !*verify {
+			_, err := io.Copy(os.Stdout, r)
+			exitErr(err)
+		} else {
+			_, err := io.Copy(ioutil.Discard, r)
+			exitErr(err)
+		}
 		return
 	}
 	var files []string
@@ -78,18 +91,26 @@ Options:`)
 			fmt.Println("Skipping", filename)
 			continue
 		}
+		if *bench > 0 {
+			dstFilename = "(discarded)"
+		}
+		if *verify {
+			dstFilename = "(verify)"
+		}
 
 		func() {
 			var closeOnce sync.Once
 			if !*quiet {
-				fmt.Println("Decompressing", filename, "->", dstFilename)
+				fmt.Print("Decompressing ", filename, " -> ", dstFilename)
 			}
 			// Input file.
 			file, err := os.Open(filename)
 			exitErr(err)
 			defer closeOnce.Do(func() { file.Close() })
 			rc := rCounter{in: file}
-			src := bufio.NewReaderSize(&rc, 4<<20)
+			src, err := readahead.NewReaderSize(&rc, 2, 4<<20)
+			exitErr(err)
+			defer src.Close()
 			finfo, err := file.Stat()
 			exitErr(err)
 			mode := finfo.Mode() // use the same mode for the output file
@@ -101,7 +122,7 @@ Options:`)
 			}
 			var out io.Writer
 			switch {
-			case *bench > 0:
+			case *bench > 0 || *verify:
 				out = ioutil.Discard
 			case *stdout:
 				out = os.Stdout
@@ -121,11 +142,14 @@ Options:`)
 				elapsed := time.Since(start)
 				mbPerSec := (float64(output) / (1024 * 1024)) / (float64(elapsed) / (float64(time.Second)))
 				pct := float64(output) * 100 / float64(rc.n)
-				fmt.Printf("%d -> %d [%.02f%%]; %.01fMB/s\n", rc.n, output, pct, mbPerSec)
+				fmt.Printf(" %d -> %d [%.02f%%]; %.01fMB/s\n", rc.n, output, pct, mbPerSec)
 			}
-			if *remove {
+			if *remove && !*verify {
 				closeOnce.Do(func() {
 					file.Close()
+					if !*quiet {
+						fmt.Println("Removing", filename)
+					}
 					err := os.Remove(filename)
 					exitErr(err)
 				})
@@ -136,7 +160,7 @@ Options:`)
 
 func exitErr(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err.Error())
+		fmt.Fprintln(os.Stderr, "\nERROR:", err.Error())
 		os.Exit(2)
 	}
 }

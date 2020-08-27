@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -41,6 +42,10 @@ func (m mockEncoder) encode(pe packetEncoder) error {
 	return pe.putRawBytes(m.bytes)
 }
 
+func (m mockEncoder) headerVersion() int16 {
+	return 0
+}
+
 type brokerMetrics struct {
 	bytesRead    int
 	bytesWritten int
@@ -75,40 +80,41 @@ func TestBrokerAccessors(t *testing.T) {
 
 func TestSimpleBrokerCommunication(t *testing.T) {
 	for _, tt := range brokerTestTable {
-		Logger.Printf("Testing broker communication for %s", tt.name)
-		mb := NewMockBroker(t, 0)
-		mb.Returns(&mockEncoder{tt.response})
-		pendingNotify := make(chan brokerMetrics)
-		// Register a callback to be notified about successful requests
-		mb.SetNotifier(func(bytesRead, bytesWritten int) {
-			pendingNotify <- brokerMetrics{bytesRead, bytesWritten}
+		t.Run(tt.name, func(t *testing.T) {
+			Logger.Printf("Testing broker communication for %s", tt.name)
+			mb := NewMockBroker(t, 0)
+			mb.Returns(&mockEncoder{tt.response})
+			pendingNotify := make(chan brokerMetrics)
+			// Register a callback to be notified about successful requests
+			mb.SetNotifier(func(bytesRead, bytesWritten int) {
+				pendingNotify <- brokerMetrics{bytesRead, bytesWritten}
+			})
+			broker := NewBroker(mb.Addr())
+			// Set the broker id in order to validate local broker metrics
+			broker.id = 0
+			conf := NewConfig()
+			conf.Version = tt.version
+			err := broker.Open(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.runner(t, broker)
+			// Wait up to 500 ms for the remote broker to process the request and
+			// notify us about the metrics
+			timeout := 500 * time.Millisecond
+			select {
+			case mockBrokerMetrics := <-pendingNotify:
+				validateBrokerMetrics(t, broker, mockBrokerMetrics)
+			case <-time.After(timeout):
+				t.Errorf("No request received for: %s after waiting for %v", tt.name, timeout)
+			}
+			mb.Close()
+			err = broker.Close()
+			if err != nil {
+				t.Error(err)
+			}
 		})
-		broker := NewBroker(mb.Addr())
-		// Set the broker id in order to validate local broker metrics
-		broker.id = 0
-		conf := NewConfig()
-		conf.Version = tt.version
-		err := broker.Open(conf)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tt.runner(t, broker)
-		// Wait up to 500 ms for the remote broker to process the request and
-		// notify us about the metrics
-		timeout := 500 * time.Millisecond
-		select {
-		case mockBrokerMetrics := <-pendingNotify:
-			validateBrokerMetrics(t, broker, mockBrokerMetrics)
-		case <-time.After(timeout):
-			t.Errorf("No request received for: %s after waiting for %v", tt.name, timeout)
-		}
-		mb.Close()
-		err = broker.Close()
-		if err != nil {
-			t.Error(err)
-		}
 	}
-
 }
 
 var ErrTokenFailure = errors.New("Failure generating token")
@@ -130,9 +136,9 @@ func newTokenProvider(token *AccessToken, err error) *TokenProvider {
 }
 
 func TestSASLOAuthBearer(t *testing.T) {
-
 	testTable := []struct {
 		name                      string
+		authidentity              string
 		mockSASLHandshakeResponse MockResponse // Mock SaslHandshakeRequest response from broker
 		mockSASLAuthResponse      MockResponse // Mock SaslAuthenticateRequest response from broker
 		expectClientErr           bool         // Expect an internal client-side error
@@ -200,62 +206,60 @@ func TestSASLOAuthBearer(t *testing.T) {
 	}
 
 	for i, test := range testTable {
+		t.Run(test.name, func(t *testing.T) {
+			// mockBroker mocks underlying network logic and broker responses
+			mockBroker := NewMockBroker(t, 0)
 
-		// mockBroker mocks underlying network logic and broker responses
-		mockBroker := NewMockBroker(t, 0)
+			mockBroker.SetHandlerByMap(map[string]MockResponse{
+				"SaslAuthenticateRequest": test.mockSASLAuthResponse,
+				"SaslHandshakeRequest":    test.mockSASLHandshakeResponse,
+			})
 
-		mockBroker.SetHandlerByMap(map[string]MockResponse{
-			"SaslAuthenticateRequest": test.mockSASLAuthResponse,
-			"SaslHandshakeRequest":    test.mockSASLHandshakeResponse,
+			// broker executes SASL requests against mockBroker
+			broker := NewBroker(mockBroker.Addr())
+			broker.requestRate = metrics.NilMeter{}
+			broker.outgoingByteRate = metrics.NilMeter{}
+			broker.incomingByteRate = metrics.NilMeter{}
+			broker.requestSize = metrics.NilHistogram{}
+			broker.responseSize = metrics.NilHistogram{}
+			broker.responseRate = metrics.NilMeter{}
+			broker.requestLatency = metrics.NilHistogram{}
+			broker.requestsInFlight = metrics.NilCounter{}
+
+			conf := NewConfig()
+			conf.Net.SASL.Mechanism = SASLTypeOAuth
+			conf.Net.SASL.TokenProvider = test.tokProvider
+
+			broker.conf = conf
+
+			dialer := net.Dialer{
+				Timeout:   conf.Net.DialTimeout,
+				KeepAlive: conf.Net.KeepAlive,
+				LocalAddr: conf.Net.LocalAddr,
+			}
+
+			conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			broker.conn = conn
+
+			err = broker.authenticateViaSASL()
+
+			if test.expectedBrokerError != ErrNoError {
+				if test.expectedBrokerError != err {
+					t.Errorf("[%d]:[%s] Expected %s auth error, got %s\n", i, test.name, test.expectedBrokerError, err)
+				}
+			} else if test.expectClientErr && err == nil {
+				t.Errorf("[%d]:[%s] Expected a client error and got none\n", i, test.name)
+			} else if !test.expectClientErr && err != nil {
+				t.Errorf("[%d]:[%s] Unexpected error, got %s\n", i, test.name, err)
+			}
+
+			mockBroker.Close()
 		})
-
-		// broker executes SASL requests against mockBroker
-		broker := NewBroker(mockBroker.Addr())
-		broker.requestRate = metrics.NilMeter{}
-		broker.outgoingByteRate = metrics.NilMeter{}
-		broker.incomingByteRate = metrics.NilMeter{}
-		broker.requestSize = metrics.NilHistogram{}
-		broker.responseSize = metrics.NilHistogram{}
-		broker.responseRate = metrics.NilMeter{}
-		broker.requestLatency = metrics.NilHistogram{}
-
-		conf := NewConfig()
-		conf.Net.SASL.Mechanism = SASLTypeOAuth
-		conf.Net.SASL.TokenProvider = test.tokProvider
-
-		broker.conf = conf
-
-		dialer := net.Dialer{
-			Timeout:   conf.Net.DialTimeout,
-			KeepAlive: conf.Net.KeepAlive,
-			LocalAddr: conf.Net.LocalAddr,
-		}
-
-		conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		broker.conn = conn
-
-		err = broker.authenticateViaSASL()
-
-		if test.expectedBrokerError != ErrNoError {
-			if test.expectedBrokerError != err {
-				t.Errorf("[%d]:[%s] Expected %s auth error, got %s\n", i, test.name, test.expectedBrokerError, err)
-			}
-		} else if test.expectedBrokerError != ErrNoError {
-			if test.expectedBrokerError != err {
-				t.Errorf("[%d]:[%s] Expected %s handshake error, got %s\n", i, test.name, test.expectedBrokerError, err)
-			}
-		} else if test.expectClientErr && err == nil {
-			t.Errorf("[%d]:[%s] Expected a client error and got none\n", i, test.name)
-		} else if !test.expectClientErr && err != nil {
-			t.Errorf("[%d]:[%s] Unexpected error, got %s\n", i, test.name, err)
-		}
-
-		mockBroker.Close()
 	}
 }
 
@@ -264,7 +268,7 @@ type MockSCRAMClient struct {
 	done bool
 }
 
-func (m *MockSCRAMClient) Begin(userName, password, authzID string) (err error) {
+func (m *MockSCRAMClient) Begin(_, _, _ string) (err error) {
 	return nil
 }
 
@@ -295,7 +299,7 @@ func TestSASLSCRAMSHAXXX(t *testing.T) {
 		scramChallengeResp string
 	}{
 		{
-			name:               "SASL/SCRAMSHAXXX successfull authentication",
+			name:               "SASL/SCRAMSHAXXX successful authentication",
 			mockHandshakeErr:   ErrNoError,
 			scramClient:        &MockSCRAMClient{},
 			scramChallengeResp: "pong",
@@ -325,83 +329,91 @@ func TestSASLSCRAMSHAXXX(t *testing.T) {
 	}
 
 	for i, test := range testTable {
+		t.Run(test.name, func(t *testing.T) {
+			// mockBroker mocks underlying network logic and broker responses
+			mockBroker := NewMockBroker(t, 0)
+			broker := NewBroker(mockBroker.Addr())
+			// broker executes SASL requests against mockBroker
+			broker.requestRate = metrics.NilMeter{}
+			broker.outgoingByteRate = metrics.NilMeter{}
+			broker.incomingByteRate = metrics.NilMeter{}
+			broker.requestSize = metrics.NilHistogram{}
+			broker.responseSize = metrics.NilHistogram{}
+			broker.responseRate = metrics.NilMeter{}
+			broker.requestLatency = metrics.NilHistogram{}
+			broker.requestsInFlight = metrics.NilCounter{}
 
-		// mockBroker mocks underlying network logic and broker responses
-		mockBroker := NewMockBroker(t, 0)
-		broker := NewBroker(mockBroker.Addr())
-		// broker executes SASL requests against mockBroker
-		broker.requestRate = metrics.NilMeter{}
-		broker.outgoingByteRate = metrics.NilMeter{}
-		broker.incomingByteRate = metrics.NilMeter{}
-		broker.requestSize = metrics.NilHistogram{}
-		broker.responseSize = metrics.NilHistogram{}
-		broker.responseRate = metrics.NilMeter{}
-		broker.requestLatency = metrics.NilHistogram{}
+			mockSASLAuthResponse := NewMockSaslAuthenticateResponse(t).SetAuthBytes([]byte(test.scramChallengeResp))
+			mockSASLHandshakeResponse := NewMockSaslHandshakeResponse(t).SetEnabledMechanisms([]string{SASLTypeSCRAMSHA256, SASLTypeSCRAMSHA512})
 
-		mockSASLAuthResponse := NewMockSaslAuthenticateResponse(t).SetAuthBytes([]byte(test.scramChallengeResp))
-		mockSASLHandshakeResponse := NewMockSaslHandshakeResponse(t).SetEnabledMechanisms([]string{SASLTypeSCRAMSHA256, SASLTypeSCRAMSHA512})
+			if test.mockSASLAuthErr != ErrNoError {
+				mockSASLAuthResponse = mockSASLAuthResponse.SetError(test.mockSASLAuthErr)
+			}
+			if test.mockHandshakeErr != ErrNoError {
+				mockSASLHandshakeResponse = mockSASLHandshakeResponse.SetError(test.mockHandshakeErr)
+			}
 
-		if test.mockSASLAuthErr != ErrNoError {
-			mockSASLAuthResponse = mockSASLAuthResponse.SetError(test.mockSASLAuthErr)
-		}
-		if test.mockHandshakeErr != ErrNoError {
-			mockSASLHandshakeResponse = mockSASLHandshakeResponse.SetError(test.mockHandshakeErr)
-		}
+			mockBroker.SetHandlerByMap(map[string]MockResponse{
+				"SaslAuthenticateRequest": mockSASLAuthResponse,
+				"SaslHandshakeRequest":    mockSASLHandshakeResponse,
+			})
 
-		mockBroker.SetHandlerByMap(map[string]MockResponse{
-			"SaslAuthenticateRequest": mockSASLAuthResponse,
-			"SaslHandshakeRequest":    mockSASLHandshakeResponse,
+			conf := NewConfig()
+			conf.Net.SASL.Mechanism = SASLTypeSCRAMSHA512
+			conf.Net.SASL.SCRAMClientGeneratorFunc = func() SCRAMClient { return test.scramClient }
+
+			broker.conf = conf
+			dialer := net.Dialer{
+				Timeout:   conf.Net.DialTimeout,
+				KeepAlive: conf.Net.KeepAlive,
+				LocalAddr: conf.Net.LocalAddr,
+			}
+
+			conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			broker.conn = conn
+
+			err = broker.authenticateViaSASL()
+
+			if test.mockSASLAuthErr != ErrNoError {
+				if test.mockSASLAuthErr != err {
+					t.Errorf("[%d]:[%s] Expected %s SASL authentication error, got %s\n", i, test.name, test.mockHandshakeErr, err)
+				}
+			} else if test.mockHandshakeErr != ErrNoError {
+				if test.mockHandshakeErr != err {
+					t.Errorf("[%d]:[%s] Expected %s handshake error, got %s\n", i, test.name, test.mockHandshakeErr, err)
+				}
+			} else if test.expectClientErr && err == nil {
+				t.Errorf("[%d]:[%s] Expected a client error and got none\n", i, test.name)
+			} else if !test.expectClientErr && err != nil {
+				t.Errorf("[%d]:[%s] Unexpected error, got %s\n", i, test.name, err)
+			}
+
+			mockBroker.Close()
 		})
-
-		conf := NewConfig()
-		conf.Net.SASL.Mechanism = SASLTypeSCRAMSHA512
-		conf.Net.SASL.SCRAMClientGeneratorFunc = func() SCRAMClient { return test.scramClient }
-
-		broker.conf = conf
-		dialer := net.Dialer{
-			Timeout:   conf.Net.DialTimeout,
-			KeepAlive: conf.Net.KeepAlive,
-			LocalAddr: conf.Net.LocalAddr,
-		}
-
-		conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		broker.conn = conn
-
-		err = broker.authenticateViaSASL()
-
-		if test.mockSASLAuthErr != ErrNoError {
-			if test.mockSASLAuthErr != err {
-				t.Errorf("[%d]:[%s] Expected %s SASL authentication error, got %s\n", i, test.name, test.mockHandshakeErr, err)
-			}
-		} else if test.mockHandshakeErr != ErrNoError {
-			if test.mockHandshakeErr != err {
-				t.Errorf("[%d]:[%s] Expected %s handshake error, got %s\n", i, test.name, test.mockHandshakeErr, err)
-			}
-		} else if test.expectClientErr && err == nil {
-			t.Errorf("[%d]:[%s] Expected a client error and got none\n", i, test.name)
-		} else if !test.expectClientErr && err != nil {
-			t.Errorf("[%d]:[%s] Unexpected error, got %s\n", i, test.name, err)
-		}
-
-		mockBroker.Close()
 	}
 }
 
 func TestSASLPlainAuth(t *testing.T) {
-
 	testTable := []struct {
 		name             string
+		authidentity     string
 		mockAuthErr      KError // Mock and expect error returned from SaslAuthenticateRequest
 		mockHandshakeErr KError // Mock and expect error returned from SaslHandshakeRequest
 		expectClientErr  bool   // Expect an internal client-side error
 	}{
 		{
 			name:             "SASL Plain OK server response",
+			mockAuthErr:      ErrNoError,
+			mockHandshakeErr: ErrNoError,
+		},
+		{
+			name:             "SASL Plain OK server response with authidentity",
+			authidentity:     "authid",
 			mockAuthErr:      ErrNoError,
 			mockHandshakeErr: ErrNoError,
 		},
@@ -418,78 +430,98 @@ func TestSASLPlainAuth(t *testing.T) {
 	}
 
 	for i, test := range testTable {
+		t.Run(test.name, func(t *testing.T) {
+			// mockBroker mocks underlying network logic and broker responses
+			mockBroker := NewMockBroker(t, 0)
 
-		// mockBroker mocks underlying network logic and broker responses
-		mockBroker := NewMockBroker(t, 0)
+			mockSASLAuthResponse := NewMockSaslAuthenticateResponse(t).
+				SetAuthBytes([]byte(`response_payload`))
 
-		mockSASLAuthResponse := NewMockSaslAuthenticateResponse(t).
-			SetAuthBytes([]byte(`response_payload`))
+			if test.mockAuthErr != ErrNoError {
+				mockSASLAuthResponse = mockSASLAuthResponse.SetError(test.mockAuthErr)
+			}
 
-		if test.mockAuthErr != ErrNoError {
-			mockSASLAuthResponse = mockSASLAuthResponse.SetError(test.mockAuthErr)
-		}
+			mockSASLHandshakeResponse := NewMockSaslHandshakeResponse(t).
+				SetEnabledMechanisms([]string{SASLTypePlaintext})
 
-		mockSASLHandshakeResponse := NewMockSaslHandshakeResponse(t).
-			SetEnabledMechanisms([]string{SASLTypePlaintext})
+			if test.mockHandshakeErr != ErrNoError {
+				mockSASLHandshakeResponse = mockSASLHandshakeResponse.SetError(test.mockHandshakeErr)
+			}
 
-		if test.mockHandshakeErr != ErrNoError {
-			mockSASLHandshakeResponse = mockSASLHandshakeResponse.SetError(test.mockHandshakeErr)
-		}
+			mockBroker.SetHandlerByMap(map[string]MockResponse{
+				"SaslAuthenticateRequest": mockSASLAuthResponse,
+				"SaslHandshakeRequest":    mockSASLHandshakeResponse,
+			})
 
-		mockBroker.SetHandlerByMap(map[string]MockResponse{
-			"SaslAuthenticateRequest": mockSASLAuthResponse,
-			"SaslHandshakeRequest":    mockSASLHandshakeResponse,
+			// broker executes SASL requests against mockBroker
+			broker := NewBroker(mockBroker.Addr())
+			broker.requestRate = metrics.NilMeter{}
+			broker.outgoingByteRate = metrics.NilMeter{}
+			broker.incomingByteRate = metrics.NilMeter{}
+			broker.requestSize = metrics.NilHistogram{}
+			broker.responseSize = metrics.NilHistogram{}
+			broker.responseRate = metrics.NilMeter{}
+			broker.requestLatency = metrics.NilHistogram{}
+			broker.requestsInFlight = metrics.NilCounter{}
+
+			conf := NewConfig()
+			conf.Net.SASL.Mechanism = SASLTypePlaintext
+			conf.Net.SASL.AuthIdentity = test.authidentity
+			conf.Net.SASL.User = "token"
+			conf.Net.SASL.Password = "password"
+			conf.Net.SASL.Version = SASLHandshakeV1
+
+			broker.conf = conf
+			broker.conf.Version = V1_0_0_0
+			dialer := net.Dialer{
+				Timeout:   conf.Net.DialTimeout,
+				KeepAlive: conf.Net.KeepAlive,
+				LocalAddr: conf.Net.LocalAddr,
+			}
+
+			conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			broker.conn = conn
+
+			err = broker.authenticateViaSASL()
+			if err == nil {
+				for _, rr := range mockBroker.History() {
+					switch r := rr.Request.(type) {
+					case *SaslAuthenticateRequest:
+						x := bytes.SplitN(r.SaslAuthBytes, []byte("\x00"), 3)
+						if string(x[0]) != conf.Net.SASL.AuthIdentity {
+							t.Errorf("[%d]:[%s] expected %s auth identity, got %s\n", i, test.name, conf.Net.SASL.AuthIdentity, x[0])
+						}
+						if string(x[1]) != conf.Net.SASL.User {
+							t.Errorf("[%d]:[%s] expected %s user, got %s\n", i, test.name, conf.Net.SASL.User, x[1])
+						}
+						if string(x[2]) != conf.Net.SASL.Password {
+							t.Errorf("[%d]:[%s] expected %s password, got %s\n", i, test.name, conf.Net.SASL.Password, x[2])
+						}
+					}
+				}
+			}
+
+			if test.mockAuthErr != ErrNoError {
+				if test.mockAuthErr != err {
+					t.Errorf("[%d]:[%s] Expected %s auth error, got %s\n", i, test.name, test.mockAuthErr, err)
+				}
+			} else if test.mockHandshakeErr != ErrNoError {
+				if test.mockHandshakeErr != err {
+					t.Errorf("[%d]:[%s] Expected %s handshake error, got %s\n", i, test.name, test.mockHandshakeErr, err)
+				}
+			} else if test.expectClientErr && err == nil {
+				t.Errorf("[%d]:[%s] Expected a client error and got none\n", i, test.name)
+			} else if !test.expectClientErr && err != nil {
+				t.Errorf("[%d]:[%s] Unexpected error, got %s\n", i, test.name, err)
+			}
+
+			mockBroker.Close()
 		})
-
-		// broker executes SASL requests against mockBroker
-		broker := NewBroker(mockBroker.Addr())
-		broker.requestRate = metrics.NilMeter{}
-		broker.outgoingByteRate = metrics.NilMeter{}
-		broker.incomingByteRate = metrics.NilMeter{}
-		broker.requestSize = metrics.NilHistogram{}
-		broker.responseSize = metrics.NilHistogram{}
-		broker.responseRate = metrics.NilMeter{}
-		broker.requestLatency = metrics.NilHistogram{}
-
-		conf := NewConfig()
-		conf.Net.SASL.Mechanism = SASLTypePlaintext
-		conf.Net.SASL.User = "token"
-		conf.Net.SASL.Password = "password"
-		conf.Net.SASL.Version = SASLHandshakeV1
-
-		broker.conf = conf
-		broker.conf.Version = V1_0_0_0
-		dialer := net.Dialer{
-			Timeout:   conf.Net.DialTimeout,
-			KeepAlive: conf.Net.KeepAlive,
-			LocalAddr: conf.Net.LocalAddr,
-		}
-
-		conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		broker.conn = conn
-
-		err = broker.authenticateViaSASL()
-
-		if test.mockAuthErr != ErrNoError {
-			if test.mockAuthErr != err {
-				t.Errorf("[%d]:[%s] Expected %s auth error, got %s\n", i, test.name, test.mockAuthErr, err)
-			}
-		} else if test.mockHandshakeErr != ErrNoError {
-			if test.mockHandshakeErr != err {
-				t.Errorf("[%d]:[%s] Expected %s handshake error, got %s\n", i, test.name, test.mockHandshakeErr, err)
-			}
-		} else if test.expectClientErr && err == nil {
-			t.Errorf("[%d]:[%s] Expected a client error and got none\n", i, test.name)
-		} else if !test.expectClientErr && err != nil {
-			t.Errorf("[%d]:[%s] Unexpected error, got %s\n", i, test.name, err)
-		}
-
-		mockBroker.Close()
 	}
 }
 
@@ -515,6 +547,7 @@ func TestSASLReadTimeout(t *testing.T) {
 		broker.responseSize = metrics.NilHistogram{}
 		broker.responseRate = metrics.NilMeter{}
 		broker.requestLatency = metrics.NilHistogram{}
+		broker.requestsInFlight = metrics.NilCounter{}
 	}
 
 	conf := NewConfig()
@@ -543,7 +576,6 @@ func TestSASLReadTimeout(t *testing.T) {
 }
 
 func TestGSSAPIKerberosAuth_Authorize(t *testing.T) {
-
 	testTable := []struct {
 		name               string
 		error              error
@@ -592,78 +624,79 @@ func TestGSSAPIKerberosAuth_Authorize(t *testing.T) {
 		},
 	}
 	for i, test := range testTable {
-		mockBroker := NewMockBroker(t, 0)
-		// broker executes SASL requests against mockBroker
+		t.Run(test.name, func(t *testing.T) {
+			mockBroker := NewMockBroker(t, 0)
+			// broker executes SASL requests against mockBroker
 
-		mockBroker.SetGSSAPIHandler(func(bytes []byte) []byte {
-			return nil
-		})
-		broker := NewBroker(mockBroker.Addr())
-		broker.requestRate = metrics.NilMeter{}
-		broker.outgoingByteRate = metrics.NilMeter{}
-		broker.incomingByteRate = metrics.NilMeter{}
-		broker.requestSize = metrics.NilHistogram{}
-		broker.responseSize = metrics.NilHistogram{}
-		broker.responseRate = metrics.NilMeter{}
-		broker.requestLatency = metrics.NilHistogram{}
-		conf := NewConfig()
-		conf.Net.SASL.Mechanism = SASLTypeGSSAPI
-		conf.Net.SASL.GSSAPI.ServiceName = "kafka"
-		conf.Net.SASL.GSSAPI.KerberosConfigPath = "krb5.conf"
-		conf.Net.SASL.GSSAPI.Realm = "EXAMPLE.COM"
-		conf.Net.SASL.GSSAPI.Username = "kafka"
-		conf.Net.SASL.GSSAPI.Password = "kafka"
-		conf.Net.SASL.GSSAPI.KeyTabPath = "kafka.keytab"
-		conf.Net.SASL.GSSAPI.AuthType = KRB5_USER_AUTH
-		broker.conf = conf
-		broker.conf.Version = V1_0_0_0
-		dialer := net.Dialer{
-			Timeout:   conf.Net.DialTimeout,
-			KeepAlive: conf.Net.KeepAlive,
-			LocalAddr: conf.Net.LocalAddr,
-		}
-
-		conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
-
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		gssapiHandler := KafkaGSSAPIHandler{
-			client:         &MockKerberosClient{},
-			badResponse:    test.badResponse,
-			badKeyChecksum: test.badKeyChecksum,
-		}
-		mockBroker.SetGSSAPIHandler(gssapiHandler.MockKafkaGSSAPI)
-		broker.conn = conn
-		if test.mockKerberosClient {
-			broker.kerberosAuthenticator.NewKerberosClientFunc = func(config *GSSAPIConfig) (KerberosClient, error) {
-				return &MockKerberosClient{
-					mockError:  test.error,
-					errorStage: test.errorStage,
-				}, nil
+			mockBroker.SetGSSAPIHandler(func(bytes []byte) []byte {
+				return nil
+			})
+			broker := NewBroker(mockBroker.Addr())
+			broker.requestRate = metrics.NilMeter{}
+			broker.outgoingByteRate = metrics.NilMeter{}
+			broker.incomingByteRate = metrics.NilMeter{}
+			broker.requestSize = metrics.NilHistogram{}
+			broker.responseSize = metrics.NilHistogram{}
+			broker.responseRate = metrics.NilMeter{}
+			broker.requestLatency = metrics.NilHistogram{}
+			broker.requestsInFlight = metrics.NilCounter{}
+			conf := NewConfig()
+			conf.Net.SASL.Mechanism = SASLTypeGSSAPI
+			conf.Net.SASL.GSSAPI.ServiceName = "kafka"
+			conf.Net.SASL.GSSAPI.KerberosConfigPath = "krb5.conf"
+			conf.Net.SASL.GSSAPI.Realm = "EXAMPLE.COM"
+			conf.Net.SASL.GSSAPI.Username = "kafka"
+			conf.Net.SASL.GSSAPI.Password = "kafka"
+			conf.Net.SASL.GSSAPI.KeyTabPath = "kafka.keytab"
+			conf.Net.SASL.GSSAPI.AuthType = KRB5_USER_AUTH
+			broker.conf = conf
+			broker.conf.Version = V1_0_0_0
+			dialer := net.Dialer{
+				Timeout:   conf.Net.DialTimeout,
+				KeepAlive: conf.Net.KeepAlive,
+				LocalAddr: conf.Net.LocalAddr,
 			}
-		} else {
-			broker.kerberosAuthenticator.NewKerberosClientFunc = nil
-		}
 
-		err = broker.authenticateViaSASL()
+			conn, err := dialer.Dial("tcp", mockBroker.listener.Addr().String())
 
-		if err != nil && test.error != nil {
-			if test.error.Error() != err.Error() {
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			gssapiHandler := KafkaGSSAPIHandler{
+				client:         &MockKerberosClient{},
+				badResponse:    test.badResponse,
+				badKeyChecksum: test.badKeyChecksum,
+			}
+			mockBroker.SetGSSAPIHandler(gssapiHandler.MockKafkaGSSAPI)
+			broker.conn = conn
+			if test.mockKerberosClient {
+				broker.kerberosAuthenticator.NewKerberosClientFunc = func(config *GSSAPIConfig) (KerberosClient, error) {
+					return &MockKerberosClient{
+						mockError:  test.error,
+						errorStage: test.errorStage,
+					}, nil
+				}
+			} else {
+				broker.kerberosAuthenticator.NewKerberosClientFunc = nil
+			}
+
+			err = broker.authenticateViaSASL()
+
+			if err != nil && test.error != nil {
+				if test.error.Error() != err.Error() {
+					t.Errorf("[%d] Expected error:%s, got:%s.", i, test.error, err)
+				}
+			} else if (err == nil && test.error != nil) || (err != nil && test.error == nil) {
 				t.Errorf("[%d] Expected error:%s, got:%s.", i, test.error, err)
 			}
-		} else if (err == nil && test.error != nil) || (err != nil && test.error == nil) {
-			t.Errorf("[%d] Expected error:%s, got:%s.", i, test.error, err)
-		}
 
-		mockBroker.Close()
+			mockBroker.Close()
+		})
 	}
-
 }
 
 func TestBuildClientFirstMessage(t *testing.T) {
-
 	testTable := []struct {
 		name        string
 		token       *AccessToken
@@ -700,18 +733,19 @@ func TestBuildClientFirstMessage(t *testing.T) {
 	}
 
 	for i, test := range testTable {
+		t.Run(test.name, func(t *testing.T) {
+			actual, err := buildClientFirstMessage(test.token)
 
-		actual, err := buildClientFirstMessage(test.token)
-
-		if !reflect.DeepEqual(test.expected, actual) {
-			t.Errorf("Expected %s, got %s\n", test.expected, actual)
-		}
-		if test.expectError && err == nil {
-			t.Errorf("[%d]:[%s] Expected an error but did not get one", i, test.name)
-		}
-		if !test.expectError && err != nil {
-			t.Errorf("[%d]:[%s] Expected no error but got %s\n", i, test.name, err)
-		}
+			if !reflect.DeepEqual(test.expected, actual) {
+				t.Errorf("Expected %s, got %s\n", test.expected, actual)
+			}
+			if test.expectError && err == nil {
+				t.Errorf("[%d]:[%s] Expected an error but did not get one", i, test.name)
+			}
+			if !test.expectError && err != nil {
+				t.Errorf("[%d]:[%s] Expected no error but got %s\n", i, test.name, err)
+			}
+		})
 	}
 }
 
@@ -972,6 +1006,9 @@ func validateBrokerMetrics(t *testing.T, broker *Broker, mockBrokerMetrics broke
 	metricValidators.registerForAllBrokers(broker, countMeterValidator("request-rate", 1))
 	metricValidators.registerForAllBrokers(broker, countHistogramValidator("request-size", 1))
 	metricValidators.registerForAllBrokers(broker, minMaxHistogramValidator("request-size", mockBrokerBytesRead, mockBrokerBytesRead))
+
+	// Check that there is no more requests in flight
+	metricValidators.registerForAllBrokers(broker, counterValidator("requests-in-flight", 0))
 
 	// Run the validators
 	metricValidators.run(t, broker.conf.MetricRegistry)

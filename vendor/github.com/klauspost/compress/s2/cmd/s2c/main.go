@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
+	"runtime/trace"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/klauspost/compress/s2"
+	"github.com/klauspost/compress/s2/cmd/internal/readahead"
 )
 
 var (
@@ -30,9 +35,19 @@ var (
 	quiet     = flag.Bool("q", false, "Don't write any output to terminal, except errors")
 	bench     = flag.Int("bench", 0, "Run benchmark n times. No output will be written")
 	help      = flag.Bool("help", false, "Display help")
+
+	cpuprofile, memprofile, traceprofile string
+
+	version = "(dev)"
+	date    = "(unknown)"
 )
 
 func main() {
+	if false {
+		flag.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to file")
+		flag.StringVar(&memprofile, "memprofile", "", "write mem profile to file")
+		flag.StringVar(&traceprofile, "traceprofile", "", "write trace profile to file")
+	}
 	flag.Parse()
 	sz, err := toSize(*blockSize)
 	exitErr(err)
@@ -41,6 +56,9 @@ func main() {
 
 	args := flag.Args()
 	if len(args) == 0 || *help {
+		_, _ = fmt.Fprintf(os.Stderr, "s2 compress v%v, built at %v.\n\n", version, date)
+		_, _ = fmt.Fprintf(os.Stderr, "Copyright (c) 2011 The Snappy-Go Authors. All rights reserved.\n"+
+			"Copyright (c) 2019 Klaus Post. All rights reserved.\n\n")
 		_, _ = fmt.Fprintln(os.Stderr, `Usage: s2c [options] file1 file2
 
 Compresses all files supplied as input separately.
@@ -62,10 +80,13 @@ Options:`)
 
 	// No args, use stdin/stdout
 	if len(args) == 1 && args[0] == "-" {
+		// Catch interrupt, so we don't exit at once.
+		// os.Stdin will return EOF, so we should be able to get everything.
+		signal.Notify(make(chan os.Signal), os.Interrupt)
 		wr.Reset(os.Stdout)
-		_, err := io.Copy(wr, os.Stdin)
-		exitErr(err)
-		exitErr(wr.Close())
+		_, err = wr.ReadFrom(os.Stdin)
+		printErr(err)
+		printErr(wr.Close())
 		return
 	}
 	var files []string
@@ -78,6 +99,34 @@ Options:`)
 		}
 		files = append(files, found...)
 	}
+	if cpuprofile != "" {
+		f, err := os.Create(cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
+	if memprofile != "" {
+		f, err := os.Create(memprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		defer pprof.WriteHeapProfile(f)
+	}
+	if traceprofile != "" {
+		f, err := os.Create(traceprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		err = trace.Start(f)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer trace.Stop()
+	}
 
 	*quiet = *quiet || *stdout
 	allFiles := files
@@ -88,14 +137,19 @@ Options:`)
 		func() {
 			var closeOnce sync.Once
 			dstFilename := fmt.Sprintf("%s%s", filename, ".s2")
+			if *bench > 0 {
+				dstFilename = "(discarded)"
+			}
 			if !*quiet {
-				fmt.Println("Compressing", filename, "->", dstFilename)
+				fmt.Print("Compressing ", filename, " -> ", dstFilename)
 			}
 			// Input file.
 			file, err := os.Open(filename)
 			exitErr(err)
 			defer closeOnce.Do(func() { file.Close() })
-			src := bufio.NewReaderSize(file, int(sz)*2)
+			src, err := readahead.NewReaderSize(file, *cpu+1, 1<<20)
+			exitErr(err)
+			defer src.Close()
 			finfo, err := file.Stat()
 			exitErr(err)
 			var out io.Writer
@@ -131,11 +185,14 @@ Options:`)
 				elapsed := time.Since(start)
 				mbpersec := (float64(input) / (1024 * 1024)) / (float64(elapsed) / (float64(time.Second)))
 				pct := float64(wc.n) * 100 / float64(input)
-				fmt.Printf("%d -> %d [%.02f%%]; %.01fMB/s\n", input, wc.n, pct, mbpersec)
+				fmt.Printf(" %d -> %d [%.02f%%]; %.01fMB/s\n", input, wc.n, pct, mbpersec)
 			}
 			if *remove {
 				closeOnce.Do(func() {
 					file.Close()
+					if !*quiet {
+						fmt.Println("Removing", filename)
+					}
 					err := os.Remove(filename)
 					exitErr(err)
 				})
@@ -144,9 +201,15 @@ Options:`)
 	}
 }
 
+func printErr(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "\nERROR:", err.Error())
+	}
+}
+
 func exitErr(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ERROR:", err.Error())
+		fmt.Fprintln(os.Stderr, "\nERROR:", err.Error())
 		os.Exit(2)
 	}
 }

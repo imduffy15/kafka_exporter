@@ -7,15 +7,13 @@ import (
 )
 
 func initOffsetManagerWithBackoffFunc(t *testing.T, retention time.Duration,
-	backoffFunc func(retries, maxRetries int) time.Duration) (om OffsetManager,
+	backoffFunc func(retries, maxRetries int) time.Duration, config *Config) (om OffsetManager,
 	testClient Client, broker, coordinator *MockBroker) {
-
-	config := NewConfig()
 	config.Metadata.Retry.Max = 1
 	if backoffFunc != nil {
 		config.Metadata.Retry.BackoffFunc = backoffFunc
 	}
-	config.Consumer.Offsets.CommitInterval = 1 * time.Millisecond
+	config.Consumer.Offsets.AutoCommit.Interval = 1 * time.Millisecond
 	config.Version = V0_9_0_0
 	if retention > 0 {
 		config.Consumer.Offsets.Retention = retention
@@ -52,12 +50,11 @@ func initOffsetManagerWithBackoffFunc(t *testing.T, retention time.Duration,
 
 func initOffsetManager(t *testing.T, retention time.Duration) (om OffsetManager,
 	testClient Client, broker, coordinator *MockBroker) {
-	return initOffsetManagerWithBackoffFunc(t, retention, nil)
+	return initOffsetManagerWithBackoffFunc(t, retention, nil, NewConfig())
 }
 
 func initPartitionOffsetManager(t *testing.T, om OffsetManager,
 	coordinator *MockBroker, initialOffset int64, metadata string) PartitionOffsetManager {
-
 	fetchResponse := new(OffsetFetchResponse)
 	fetchResponse.AddBlock("my_topic", 0, &OffsetFetchResponseBlock{
 		Err:      ErrNoError,
@@ -95,6 +92,139 @@ func TestNewOffsetManager(t *testing.T) {
 	if err != ErrClosedClient {
 		t.Errorf("Error expected for closed client; actual value: %v", err)
 	}
+}
+
+var offsetsautocommitTestTable = []struct {
+	name   string
+	set    bool // if given will override default configuration for Consumer.Offsets.AutoCommit.Enable
+	enable bool
+}{
+	{
+		"AutoCommit (default)",
+		false, // use default
+		true,
+	},
+	{
+		"AutoCommit Enabled",
+		true,
+		true,
+	},
+	{
+		"AutoCommit Disabled",
+		true,
+		false,
+	},
+}
+
+func TestNewOffsetManagerOffsetsAutoCommit(t *testing.T) {
+	// Tests to validate configuration of `Consumer.Offsets.AutoCommit.Enable`
+	for _, tt := range offsetsautocommitTestTable {
+		t.Run(tt.name, func(t *testing.T) {
+			config := NewConfig()
+			if tt.set {
+				config.Consumer.Offsets.AutoCommit.Enable = tt.enable
+			}
+			om, testClient, broker, coordinator := initOffsetManagerWithBackoffFunc(t, 0, nil, config)
+			pom := initPartitionOffsetManager(t, om, coordinator, 5, "original_meta")
+
+			// Wait long enough for the test not to fail..
+			timeout := 50 * config.Consumer.Offsets.AutoCommit.Interval
+
+			called := make(chan none)
+
+			ocResponse := new(OffsetCommitResponse)
+			ocResponse.AddError("my_topic", 0, ErrNoError)
+			handler := func(req *request) (res encoderWithHeader) {
+				close(called)
+				return ocResponse
+			}
+			coordinator.setHandler(handler)
+
+			// Should force an offset commit, if auto-commit is enabled.
+			expected := int64(1)
+			pom.ResetOffset(expected, "modified_meta")
+			_, _ = pom.NextOffset()
+
+			select {
+			case <-called:
+				// OffsetManager called on the wire.
+				if !config.Consumer.Offsets.AutoCommit.Enable {
+					t.Errorf("Received request for: %s when AutoCommit is disabled", tt.name)
+				}
+			case <-time.After(timeout):
+				// Timeout waiting for OffsetManager to call on the wire.
+				if config.Consumer.Offsets.AutoCommit.Enable {
+					t.Errorf("No request received for: %s after waiting for %v", tt.name, timeout)
+				}
+			}
+
+			broker.Close()
+			coordinator.Close()
+
+			// !! om must be closed before the pom so pom.release() is called before pom.Close()
+			safeClose(t, om)
+			safeClose(t, pom)
+			safeClose(t, testClient)
+		})
+	}
+}
+
+func TestNewOffsetManagerOffsetsManualCommit(t *testing.T) {
+	// Tests to validate configuration when `Consumer.Offsets.AutoCommit.Enable` is false
+	config := NewConfig()
+	config.Consumer.Offsets.AutoCommit.Enable = false
+
+	om, testClient, broker, coordinator := initOffsetManagerWithBackoffFunc(t, 0, nil, config)
+	pom := initPartitionOffsetManager(t, om, coordinator, 5, "original_meta")
+
+	// Wait long enough for the test not to fail..
+	timeout := 50 * config.Consumer.Offsets.AutoCommit.Interval
+
+	ocResponse := new(OffsetCommitResponse)
+	ocResponse.AddError("my_topic", 0, ErrNoError)
+	called := make(chan none)
+	handler := func(req *request) (res encoderWithHeader) {
+		close(called)
+		return ocResponse
+	}
+	coordinator.setHandler(handler)
+
+	// Should not trigger an auto-commit
+	expected := int64(1)
+	pom.ResetOffset(expected, "modified_meta")
+	_, _ = pom.NextOffset()
+
+	select {
+	case <-called:
+		// OffsetManager called on the wire.
+		t.Errorf("Received request when AutoCommit is disabled")
+	case <-time.After(timeout):
+		// Timeout waiting for OffsetManager to call on the wire.
+		// OK
+	}
+
+	// Setup again to test manual commit
+	called = make(chan none)
+
+	om.Commit()
+
+	select {
+	case <-called:
+		// OffsetManager called on the wire.
+		// OK
+	case <-time.After(timeout):
+		// Timeout waiting for OffsetManager to call on the wire.
+		t.Errorf("No request received for after waiting for %v", timeout)
+	}
+
+	// Close up
+	broker.Close()
+	coordinator.Close()
+
+	// !! om must be closed before the pom so pom.release() is called before pom.Close()
+	safeClose(t, om)
+	safeClose(t, pom)
+	safeClose(t, testClient)
 }
 
 // Test recovery from ErrNotCoordinatorForConsumer
@@ -148,7 +278,7 @@ func TestOffsetManagerFetchInitialLoadInProgress(t *testing.T) {
 		atomic.AddInt32(&retryCount, 1)
 		return 0
 	}
-	om, testClient, broker, coordinator := initOffsetManagerWithBackoffFunc(t, 0, backoff)
+	om, testClient, broker, coordinator := initOffsetManagerWithBackoffFunc(t, 0, backoff, NewConfig())
 
 	// Error on first fetchInitialOffset call
 	responseBlock := OffsetFetchResponseBlock{
@@ -257,7 +387,7 @@ func TestPartitionOffsetManagerResetOffsetWithRetention(t *testing.T) {
 
 	ocResponse := new(OffsetCommitResponse)
 	ocResponse.AddError("my_topic", 0, ErrNoError)
-	handler := func(req *request) (res encoder) {
+	handler := func(req *request) (res encoderWithHeader) {
 		if req.body.version() != 2 {
 			t.Errorf("Expected to be using version 2. Actual: %v", req.body.version())
 		}
@@ -318,7 +448,7 @@ func TestPartitionOffsetManagerMarkOffsetWithRetention(t *testing.T) {
 
 	ocResponse := new(OffsetCommitResponse)
 	ocResponse.AddError("my_topic", 0, ErrNoError)
-	handler := func(req *request) (res encoder) {
+	handler := func(req *request) (res encoderWithHeader) {
 		if req.body.version() != 2 {
 			t.Errorf("Expected to be using version 2. Actual: %v", req.body.version())
 		}

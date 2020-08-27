@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -90,7 +91,7 @@ func init() {
 
 func TestCompressRegression(t *testing.T) {
 	// Match the fuzz function
-	var testInput = func(data []byte) int {
+	var testInput = func(t *testing.T, data []byte) int {
 		var enc Scratch
 		enc.WantLogLess = 5
 		comp, _, err := Compress1X(data, &enc)
@@ -110,10 +111,10 @@ func TestCompressRegression(t *testing.T) {
 		}
 		out, err := dec.Decompress1X(remain)
 		if err != nil {
-			panic(err)
+			t.Error(err)
 		}
 		if !bytes.Equal(out, data) {
-			panic("decompression 1x mismatch")
+			t.Error("decompression 1x mismatch")
 		}
 		// Reuse as 4X
 		enc.Reuse = ReusePolicyAllow
@@ -137,10 +138,10 @@ func TestCompressRegression(t *testing.T) {
 		}
 		out, err = dec.Decompress4X(remain, len(data))
 		if err != nil {
-			panic(err)
+			t.Error(err)
 		}
 		if !bytes.Equal(out, data) {
-			panic("decompression 4x with reuse mismatch")
+			t.Error("decompression 4x with reuse mismatch")
 		}
 
 		enc.Reuse = ReusePolicyNone
@@ -164,10 +165,10 @@ func TestCompressRegression(t *testing.T) {
 		}
 		out, err = dec.Decompress4X(remain, len(data))
 		if err != nil {
-			panic(err)
+			t.Error(err)
 		}
 		if !bytes.Equal(out, data) {
-			panic("decompression 4x mismatch")
+			t.Error("decompression 4x mismatch")
 		}
 
 		// Reuse as 1X
@@ -192,10 +193,10 @@ func TestCompressRegression(t *testing.T) {
 		}
 		out, err = dec.Decompress1X(remain)
 		if err != nil {
-			panic(err)
+			t.Error(err)
 		}
 		if !bytes.Equal(out, data) {
-			panic("decompression 1x with reuse mismatch")
+			t.Error("decompression 1x with reuse mismatch")
 		}
 		return 1
 	}
@@ -205,7 +206,7 @@ func TestCompressRegression(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			testInput(buf0)
+			testInput(t, buf0)
 		})
 	}
 	for _, test := range testfilesExtended {
@@ -214,7 +215,7 @@ func TestCompressRegression(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			testInput(buf0)
+			testInput(t, buf0)
 		})
 	}
 }
@@ -260,6 +261,95 @@ func TestCompress1X(t *testing.T) {
 			bRe, _, err := Compress1X(b, &s)
 			if err == nil {
 				t.Log("Could re-compress to", len(bRe))
+			}
+		})
+	}
+}
+
+func TestCompress1XMustReuse(t *testing.T) {
+	for _, test := range testfiles {
+		t.Run(test.name, func(t *testing.T) {
+			var s Scratch
+			buf0, err := test.fn()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(buf0) > BlockSizeMax {
+				buf0 = buf0[:BlockSizeMax]
+			}
+			b, re, err := Compress1X(buf0, &s)
+			if err != test.err1X {
+				t.Errorf("want error %v (%T), got %v (%T)", test.err1X, test.err1X, err, err)
+			}
+			if err != nil {
+				t.Log(test.name, err.Error())
+				return
+			}
+			if b == nil {
+				t.Error("got no output")
+				return
+			}
+
+			min := s.minSize(len(buf0))
+			if len(s.OutData) < min {
+				t.Errorf("output data length (%d) below shannon limit (%d)", len(s.OutData), min)
+			}
+			if len(s.OutTable) == 0 {
+				t.Error("got no table definition")
+			}
+			if re {
+				t.Error("claimed to have re-used.")
+			}
+			if len(s.OutData) == 0 {
+				t.Error("got no data output")
+			}
+			t.Logf("%s: %d -> %d bytes (%.2f:1) re:%t (table: %d bytes)", test.name, len(buf0), len(b), float64(len(buf0))/float64(len(b)), re, len(s.OutTable))
+			table := s.OutTable
+			prevTable := s.prevTable
+			for i, v := range prevTable {
+				// Clear unused sections for comparison
+				if v.nBits == 0 {
+					prevTable[i].val = 0
+				}
+			}
+			b = s.OutData
+			actl := s.actualTableLog
+
+			// Use only the table data to recompress.
+			s = Scratch{}
+			s2 := &s
+			s.Reuse = ReusePolicyMust
+			s2, _, err = ReadTable(table, s2)
+			if err != nil {
+				t.Error("Could not read table", err)
+				return
+			}
+			if !reflect.DeepEqual(prevTable, s2.prevTable) {
+				t.Errorf("prevtable mismatch.\ngot %v\nwant %v", s2.prevTable, prevTable)
+			}
+			if actl != s.actualTableLog {
+				t.Errorf("tablelog mismatch, want %d, got %d", actl, s.actualTableLog)
+			}
+			b2, reused, err := Compress1X(buf0, s2)
+			if err != nil {
+				t.Error("Could not re-compress with prev table", err)
+			}
+			if !reused {
+				t.Error("didn't reuse...")
+				return
+			}
+			if len(b2) != len(b) {
+				t.Errorf("recompressed to different size, want %d, got %d", len(b), len(b2))
+				return
+			}
+
+			if !bytes.Equal(b, b2) {
+				for i := range b {
+					if b[i] != b2[i] {
+						t.Errorf("recompressed to different output. First mismatch at byte %d, (want %x != got %x)", i, b[i], b2[i])
+						return
+					}
+				}
 			}
 		})
 	}

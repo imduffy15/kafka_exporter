@@ -37,7 +37,7 @@ func TestEncoder_EncodeAllSimple(t *testing.T) {
 	in = append(in, in...)
 	for level := EncoderLevel(speedNotSet + 1); level < speedLast; level++ {
 		t.Run(level.String(), func(t *testing.T) {
-			e, err := NewWriter(nil, WithEncoderLevel(level))
+			e, err := NewWriter(nil, WithEncoderLevel(level), WithEncoderConcurrency(2), WithWindowSize(128<<10), WithZeroFrames(true))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestEncoderRegression(t *testing.T) {
 							encoded := enc.EncodeAll(in, nil)
 							got, err := dec.DecodeAll(encoded, nil)
 							if err != nil {
-								t.Logf("error: %v\nwant: %v\ngot:  %v", err, in, got)
+								t.Logf("error: %v\nwant: %v\ngot:  %v", err, len(in), len(got))
 								t.Fatal(err)
 							}
 
@@ -534,7 +534,7 @@ func testEncoderRoundtrip(t *testing.T, file string, wantCRC []byte) {
 			} else {
 				t.Logf("CRC Verified: %#v", gotCRC)
 			}
-			t.Log("Fast Encoder len", wantSize)
+			t.Log("Encoder len", wantSize)
 			mbpersec := (float64(wantSize) / (1024 * 1024)) / (float64(time.Since(start)) / (float64(time.Second)))
 			t.Logf("Encoded+Decoded %d bytes with %.2f MB/s", wantSize, mbpersec)
 		})
@@ -665,6 +665,34 @@ func TestEncoder_EncodeAllSilesia(t *testing.T) {
 		t.Fatal("Decoded does not match")
 	}
 	t.Log("Encoded content matched")
+}
+
+func TestEncoderReadFrom(t *testing.T) {
+	buffer := bytes.NewBuffer(nil)
+	encoder, err := NewWriter(buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := encoder.ReadFrom(strings.NewReader("0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := encoder.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dec, _ := NewReader(nil)
+	toDec := buffer.Bytes()
+	toDec = append(toDec, toDec...)
+	decoded, err := dec.DecodeAll(toDec, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal([]byte("00"), decoded) {
+		t.Logf("encoded: % x\n", buffer.Bytes())
+		t.Fatalf("output mismatch, got %s", string(decoded))
+	}
+	dec.Close()
 }
 
 func TestEncoder_EncodeAllEmpty(t *testing.T) {
@@ -800,21 +828,58 @@ func BenchmarkEncoder_EncodeAllSimple(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	enc, err := NewWriter(nil, WithEncoderConcurrency(1))
+	for level := EncoderLevel(speedNotSet + 1); level < speedLast; level++ {
+		b.Run(level.String(), func(b *testing.B) {
+			enc, err := NewWriter(nil, WithEncoderConcurrency(1), WithEncoderLevel(level))
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer enc.Close()
+			dst := enc.EncodeAll(in, nil)
+			wantSize := len(dst)
+			b.ResetTimer()
+			b.ReportAllocs()
+			b.SetBytes(int64(len(in)))
+			for i := 0; i < b.N; i++ {
+				dst := enc.EncodeAll(in, dst[:0])
+				if len(dst) != wantSize {
+					b.Fatal(len(dst), "!=", wantSize)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkEncoder_EncodeAllSimple4K(b *testing.B) {
+	f, err := os.Open("testdata/z000028")
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer enc.Close()
-	dst := enc.EncodeAll(in, nil)
-	wantSize := len(dst)
-	b.ResetTimer()
-	b.ReportAllocs()
-	b.SetBytes(int64(len(in)))
-	for i := 0; i < b.N; i++ {
-		dst := enc.EncodeAll(in, dst[:0])
-		if len(dst) != wantSize {
-			b.Fatal(len(dst), "!=", wantSize)
-		}
+	in, err := ioutil.ReadAll(f)
+	if err != nil {
+		b.Fatal(err)
+	}
+	in = in[:4096]
+
+	for level := EncoderLevel(speedNotSet + 1); level < speedLast; level++ {
+		b.Run(level.String(), func(b *testing.B) {
+			enc, err := NewWriter(nil, WithEncoderConcurrency(1), WithEncoderLevel(level))
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer enc.Close()
+			dst := enc.EncodeAll(in, nil)
+			wantSize := len(dst)
+			b.ResetTimer()
+			b.ReportAllocs()
+			b.SetBytes(int64(len(in)))
+			for i := 0; i < b.N; i++ {
+				dst := enc.EncodeAll(in, dst[:0])
+				if len(dst) != wantSize {
+					b.Fatal(len(dst), "!=", wantSize)
+				}
+			}
+		})
 	}
 }
 
@@ -890,9 +955,9 @@ func BenchmarkEncoder_EncodeAllPi(b *testing.B) {
 	}
 }
 
-func BenchmarkRandomEncodeAllFastest(b *testing.B) {
+func BenchmarkRandom4KEncodeAllFastest(b *testing.B) {
 	rng := rand.New(rand.NewSource(1))
-	data := make([]byte, 10<<20)
+	data := make([]byte, 4<<10)
 	for i := range data {
 		data[i] = uint8(rng.Intn(256))
 	}
@@ -911,12 +976,29 @@ func BenchmarkRandomEncodeAllFastest(b *testing.B) {
 	}
 }
 
-func BenchmarkRandomEncodeAllDefault(b *testing.B) {
+func BenchmarkRandom10MBEncodeAllFastest(b *testing.B) {
 	rng := rand.New(rand.NewSource(1))
 	data := make([]byte, 10<<20)
-	for i := range data {
-		data[i] = uint8(rng.Intn(256))
+	rng.Read(data)
+	enc, _ := NewWriter(nil, WithEncoderLevel(SpeedFastest), WithEncoderConcurrency(1))
+	defer enc.Close()
+	dst := enc.EncodeAll(data, nil)
+	wantSize := len(dst)
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for i := 0; i < b.N; i++ {
+		dst := enc.EncodeAll(data, dst[:0])
+		if len(dst) != wantSize {
+			b.Fatal(len(dst), "!=", wantSize)
+		}
 	}
+}
+
+func BenchmarkRandom4KEncodeAllDefault(b *testing.B) {
+	rng := rand.New(rand.NewSource(1))
+	data := make([]byte, 4<<10)
+	rng.Read(data)
 	enc, _ := NewWriter(nil, WithEncoderLevel(SpeedDefault), WithEncoderConcurrency(1))
 	defer enc.Close()
 	dst := enc.EncodeAll(data, nil)
@@ -932,12 +1014,29 @@ func BenchmarkRandomEncodeAllDefault(b *testing.B) {
 	}
 }
 
-func BenchmarkRandomEncoderFastest(b *testing.B) {
+func BenchmarkRandomEncodeAllDefault(b *testing.B) {
 	rng := rand.New(rand.NewSource(1))
 	data := make([]byte, 10<<20)
-	for i := range data {
-		data[i] = uint8(rng.Intn(256))
+	rng.Read(data)
+	enc, _ := NewWriter(nil, WithEncoderLevel(SpeedDefault), WithEncoderConcurrency(1))
+	defer enc.Close()
+	dst := enc.EncodeAll(data, nil)
+	wantSize := len(dst)
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for i := 0; i < b.N; i++ {
+		dst := enc.EncodeAll(data, dst[:0])
+		if len(dst) != wantSize {
+			b.Fatal(len(dst), "!=", wantSize)
+		}
 	}
+}
+
+func BenchmarkRandom10MBEncoderFastest(b *testing.B) {
+	rng := rand.New(rand.NewSource(1))
+	data := make([]byte, 10<<20)
+	rng.Read(data)
 	wantSize := int64(len(data))
 	enc, _ := NewWriter(ioutil.Discard, WithEncoderLevel(SpeedFastest))
 	defer enc.Close()
@@ -966,9 +1065,7 @@ func BenchmarkRandomEncoderFastest(b *testing.B) {
 func BenchmarkRandomEncoderDefault(b *testing.B) {
 	rng := rand.New(rand.NewSource(1))
 	data := make([]byte, 10<<20)
-	for i := range data {
-		data[i] = uint8(rng.Intn(256))
-	}
+	rng.Read(data)
 	wantSize := int64(len(data))
 	enc, _ := NewWriter(ioutil.Discard, WithEncoderLevel(SpeedDefault))
 	defer enc.Close()
