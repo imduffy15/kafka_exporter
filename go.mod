@@ -13,7 +13,7 @@ require (
 	github.com/eapache/queue v1.1.0
 	github.com/golang/protobuf v1.2.0
 	github.com/golang/snappy v0.0.1
-	github.com/konsorten/go-windows-terminal-sequences v1.0.1
+	github.com/konsorten/go-windows-terminal-sequences v1.0.3
 	github.com/krallistic/kazoo-go v0.0.0-20170526135507-a15279744f4e
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
 	github.com/pierrec/lz4 v0.0.0-20190327172049-315a67e90e41
@@ -23,9 +23,9 @@ require (
 	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d
 	github.com/rcrowley/go-metrics v0.0.0-20181016184325-3113b8401b8a
 	github.com/samuel/go-zookeeper v0.0.0-20180130194729-c4fab1ac1bec
-	github.com/sirupsen/logrus v1.2.0
+	github.com/sirupsen/logrus v1.6.0
 	github.com/xdg/scram v0.0.0-20180814205039-7eeb5667e42c
 	golang.org/x/crypto v0.0.0-20190404164418-38d8ce5564a5
-	golang.org/x/sys v0.0.0-20190403152447-81d4e9dc473e
+	golang.org/x/sys v0.0.0-20190422165155-953cdadca894
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 )
