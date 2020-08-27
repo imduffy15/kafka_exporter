@@ -13,7 +13,7 @@ require (
 	github.com/eapache/queue v1.1.0
 	github.com/golang/protobuf v1.2.0
 	github.com/golang/snappy v0.0.1
-	github.com/konsorten/go-windows-terminal-sequences v1.0.1
+	github.com/konsorten/go-windows-terminal-sequences v1.0.3
 	github.com/krallistic/kazoo-go v0.0.0-20170526135507-a15279744f4e
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
 	github.com/pierrec/lz4 v0.0.0-20190327172049-315a67e90e41
