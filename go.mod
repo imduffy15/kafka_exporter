@@ -6,7 +6,7 @@ require (
 	github.com/Shopify/sarama v1.27.0
 	github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc
 	github.com/alecthomas/units v0.0.0-20151022065526-2efee857e7cf
-	github.com/beorn7/perks v1.0.0
+	github.com/beorn7/perks v1.0.1
 	github.com/davecgh/go-spew v1.1.1
 	github.com/eapache/go-resiliency v1.2.0
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21
