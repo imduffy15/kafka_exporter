@@ -1,4 +1,4 @@
-FROM        debian:slim
+FROM debian:bullseye-slim
 
 COPY kafka_exporter /bin/kafka_exporter
 
