@@ -19,7 +19,7 @@ require (
 	github.com/konsorten/go-windows-terminal-sequences v1.0.3
 	github.com/krallistic/kazoo-go v0.0.0-20170526135507-a15279744f4e
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
-	github.com/pierrec/lz4 v2.5.2+incompatible
+	github.com/pierrec/lz4 v2.6.0+incompatible
 	github.com/pkg/profile v1.2.1 // indirect
 	github.com/prometheus/client_golang v1.7.1
 	github.com/prometheus/client_model v0.2.0
