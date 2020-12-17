@@ -11,7 +11,7 @@ require (
 	github.com/eapache/go-resiliency v1.2.0
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21
 	github.com/eapache/queue v1.1.0
-	github.com/golang/protobuf v1.4.2
+	github.com/golang/protobuf v1.4.3
 	github.com/golang/snappy v0.0.1
 	github.com/google/go-github v17.0.0+incompatible // indirect
 	github.com/google/go-github/v25 v25.1.3 // indirect
@@ -21,9 +21,9 @@ require (
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
 	github.com/pierrec/lz4 v2.5.2+incompatible
 	github.com/pkg/profile v1.2.1 // indirect
-	github.com/prometheus/client_golang v1.7.1
+	github.com/prometheus/client_golang v1.9.0
 	github.com/prometheus/client_model v0.2.0
-	github.com/prometheus/common v0.14.0
+	github.com/prometheus/common v0.15.0
 	github.com/prometheus/procfs v0.2.0
 	github.com/prometheus/promu v0.6.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
@@ -33,7 +33,7 @@ require (
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
 	golang.org/x/net v0.0.0-20201006153459-a7d1128ccaa0 // indirect
 	golang.org/x/oauth2 v0.0.0-20200902213428-5d25da1a8d43 // indirect
-	golang.org/x/sys v0.0.0-20201007082116-8445cc04cbdf
+	golang.org/x/sys v0.0.0-20201214210602-f9fddec55a1e
 	google.golang.org/appengine v1.6.6 // indirect
 	google.golang.org/protobuf v1.25.0 // indirect
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
