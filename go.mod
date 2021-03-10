@@ -28,7 +28,7 @@ require (
 	github.com/prometheus/promu v0.6.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
 	github.com/samuel/go-zookeeper v0.0.0-20190923202752-2cc03de413da
-	github.com/sirupsen/logrus v1.6.0
+	github.com/sirupsen/logrus v1.8.1
 	github.com/xdg/scram v0.0.0-20180814205039-7eeb5667e42c
 	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
 	golang.org/x/net v0.0.0-20201006153459-a7d1128ccaa0 // indirect
