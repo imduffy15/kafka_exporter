@@ -23,7 +23,7 @@ require (
 	github.com/pkg/profile v1.2.1 // indirect
 	github.com/prometheus/client_golang v1.7.1
 	github.com/prometheus/client_model v0.2.0
-	github.com/prometheus/common v0.14.0
+	github.com/prometheus/common v0.19.0
 	github.com/prometheus/procfs v0.2.0
 	github.com/prometheus/promu v0.6.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20200313005456-10cdbea86bc0
